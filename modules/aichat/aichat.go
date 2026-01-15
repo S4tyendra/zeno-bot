@@ -86,12 +86,20 @@ type CerebrasResponse struct {
 }
 
 var botClient *telegram.Client
+var botUserID int64
 
 func Register(client *telegram.Client) {
 	botClient = client
 
+	// Get bot's own user ID
+	me, err := client.GetMe()
+	if err == nil && me != nil {
+		botUserID = me.ID
+	}
+
 	client.On("cmd:addaikey", handleAddAPIKey, telegram.FilterPrivate)
 	client.On("cmd:askai", handleAskAI, telegram.FilterGroup)
+	client.On("message", handleReplyToBot, telegram.FilterGroup)
 }
 
 func handleAddAPIKey(m *telegram.NewMessage) error {
@@ -238,6 +246,126 @@ func handleAskAI(m *telegram.NewMessage) error {
 	return nil
 }
 
+// handleReplyToBot triggers AI when someone replies to a bot message
+func handleReplyToBot(m *telegram.NewMessage) error {
+	// Skip if it's a command
+	text := m.Text()
+	if strings.HasPrefix(text, "/") {
+		return nil
+	}
+
+	// Check if this is a reply to a message
+	replyToMsgID := m.ReplyToMsgID()
+	if replyToMsgID == 0 {
+		return nil
+	}
+
+	// Check if the replied message is from the bot
+	replyMsg := getMessageByID(m.ChatID(), replyToMsgID)
+	if replyMsg == nil {
+		return nil
+	}
+
+	// Check if the sender of the replied message is the bot
+	repliedMsgSenderID := getRepliedMessageSenderID(m.ChatID(), replyToMsgID)
+	if repliedMsgSenderID != botUserID {
+		return nil
+	}
+
+	// Get the user who triggered this
+	userID := m.SenderID()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var user models.User
+	err := db.Collection("users").FindOne(ctx, bson.M{"_id": userID}).Decode(&user)
+	if err == mongo.ErrNoDocuments || user.CerebrasAPIKey == "" {
+		// Silently ignore if user doesn't have API key
+		return nil
+	}
+	if err != nil {
+		return nil
+	}
+
+	chatID := m.ChatID()
+
+	// Build context from chat history
+	var contextBuilder strings.Builder
+	contextBuilder.WriteString("Chat context:\n```\n")
+
+	chatHistory := fetchChatHistory(chatID, m.ID, 10)
+	for _, msg := range chatHistory {
+		contextBuilder.WriteString(msg.Sender)
+		contextBuilder.WriteString("\n")
+		contextBuilder.WriteString(msg.Text)
+		contextBuilder.WriteString("\n")
+	}
+	contextBuilder.WriteString("```\n")
+
+	// Add the replied message context
+	contextBuilder.WriteString(fmt.Sprintf("Replied to:\n```\n%s\n%s\n```\n", replyMsg.Sender, replyMsg.Text))
+
+	// Add user's message
+	senderName := getSenderNameFromMessage(m)
+	contextBuilder.WriteString(fmt.Sprintf("user `%s` Said:\n```\n%s\n```\n", senderName, text))
+
+	finalPrompt := contextBuilder.String()
+
+	// Call Cerebras API
+	reqBody := CerebrasRequest{
+		Model:       "zai-glm-4.7",
+		Stream:      false,
+		MaxTokens:   1024,
+		Temperature: 1,
+		TopP:        0.95,
+		Messages: []Message{
+			{Role: "system", Content: SYSTEM_PROMPT},
+			{Role: "user", Content: finalPrompt},
+		},
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil
+	}
+
+	req, err := http.NewRequest("POST", cerebrasAPIURL, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+user.CerebrasAPIKey)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	var cerebrasResp CerebrasResponse
+	if err := json.Unmarshal(body, &cerebrasResp); err != nil {
+		return nil
+	}
+
+	if len(cerebrasResp.Choices) == 0 {
+		return nil
+	}
+
+	m.Reply(cerebrasResp.Choices[0].Message.Content)
+	return nil
+}
+
 type ChatMessage struct {
 	Sender string
 	Text   string
@@ -316,6 +444,29 @@ func getMessageByID(chatID int64, msgID int32) *ChatMessage {
 	}
 
 	return nil
+}
+
+func getRepliedMessageSenderID(chatID int64, msgID int32) int64 {
+	if botClient == nil {
+		return 0
+	}
+
+	messages, err := botClient.GetHistory(chatID, &telegram.HistoryOption{
+		Limit: 1,
+		MaxID: msgID + 1,
+		MinID: msgID - 1,
+	})
+	if err != nil || len(messages) == 0 {
+		return 0
+	}
+
+	for _, msg := range messages {
+		if msg.ID == msgID {
+			return msg.SenderID()
+		}
+	}
+
+	return 0
 }
 
 func getSenderFromNewMessage(m *telegram.NewMessage) string {
