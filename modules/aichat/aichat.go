@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -184,6 +185,12 @@ func handleAskAI(m *telegram.NewMessage) error {
 		return nil
 	}
 
+	// Send placeholder message
+	placeholder, err := m.Reply("...")
+	if err != nil {
+		return nil
+	}
+
 	// Call Cerebras API
 	reqBody := CerebrasRequest{
 		Model:       "zai-glm-4.7",
@@ -199,13 +206,13 @@ func handleAskAI(m *telegram.NewMessage) error {
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		m.Reply("Error preparing request.")
+		placeholder.Edit("Error preparing request.")
 		return nil
 	}
 
 	req, err := http.NewRequest("POST", cerebrasAPIURL, bytes.NewBuffer(jsonBody))
 	if err != nil {
-		m.Reply("Error creating request.")
+		placeholder.Edit("Error creating request.")
 		return nil
 	}
 
@@ -215,62 +222,72 @@ func handleAskAI(m *telegram.NewMessage) error {
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		m.Reply(fmt.Sprintf("AI error: %v", err))
+		placeholder.Edit(fmt.Sprintf("AI error: %v", err))
 		return nil
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		m.Reply("Error reading response.")
+		placeholder.Edit("Error reading response.")
 		return nil
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		m.Reply(fmt.Sprintf("API error (status %d): %s", resp.StatusCode, string(body)))
+		placeholder.Edit(fmt.Sprintf("API error (status %d): %s", resp.StatusCode, string(body)))
 		return nil
 	}
 
 	var cerebrasResp CerebrasResponse
 	if err := json.Unmarshal(body, &cerebrasResp); err != nil {
-		m.Reply("Error parsing AI response.")
+		placeholder.Edit("Error parsing AI response.")
 		return nil
 	}
 
 	if len(cerebrasResp.Choices) == 0 {
-		m.Reply("No response from AI.")
+		placeholder.Edit("No response from AI.")
 		return nil
 	}
 
-	m.Reply(cerebrasResp.Choices[0].Message.Content)
+	placeholder.Edit(cerebrasResp.Choices[0].Message.Content)
 	return nil
 }
 
 // handleReplyToBot triggers AI when someone replies to a bot message
 func handleReplyToBot(m *telegram.NewMessage) error {
+	log.Printf("[ReplyToBot] Received message: %q from %d in chat %d", m.Text(), m.SenderID(), m.ChatID())
+
 	// Skip if it's a command
 	text := m.Text()
 	if strings.HasPrefix(text, "/") {
+		log.Printf("[ReplyToBot] Skipping command message")
 		return nil
 	}
 
 	// Check if this is a reply to a message
 	replyToMsgID := m.ReplyToMsgID()
 	if replyToMsgID == 0 {
+		log.Printf("[ReplyToBot] Not a reply, skipping")
 		return nil
 	}
+	log.Printf("[ReplyToBot] Is reply to msgID: %d", replyToMsgID)
 
 	// Check if the replied message is from the bot
 	replyMsg := getMessageByID(m.ChatID(), replyToMsgID)
 	if replyMsg == nil {
+		log.Printf("[ReplyToBot] Could not fetch replied message")
 		return nil
 	}
+	log.Printf("[ReplyToBot] Replied msg sender: %s, text: %q", replyMsg.Sender, replyMsg.Text)
 
 	// Check if the sender of the replied message is the bot
 	repliedMsgSenderID := getRepliedMessageSenderID(m.ChatID(), replyToMsgID)
+	log.Printf("[ReplyToBot] Replied msg senderID: %d, botUserID: %d", repliedMsgSenderID, botUserID)
 	if repliedMsgSenderID != botUserID {
+		log.Printf("[ReplyToBot] Not a reply to bot, skipping")
 		return nil
 	}
+	log.Printf("[ReplyToBot] Confirmed reply to bot, proceeding with AI")
 
 	// Get the user who triggered this
 	userID := m.SenderID()
@@ -280,12 +297,14 @@ func handleReplyToBot(m *telegram.NewMessage) error {
 	var user models.User
 	err := db.Collection("users").FindOne(ctx, bson.M{"_id": userID}).Decode(&user)
 	if err == mongo.ErrNoDocuments || user.CerebrasAPIKey == "" {
-		// Silently ignore if user doesn't have API key
+		log.Printf("[ReplyToBot] User %d has no API key", userID)
 		return nil
 	}
 	if err != nil {
+		log.Printf("[ReplyToBot] DB error for user %d: %v", userID, err)
 		return nil
 	}
+	log.Printf("[ReplyToBot] User %d has valid API key", userID)
 
 	chatID := m.ChatID()
 
@@ -311,6 +330,15 @@ func handleReplyToBot(m *telegram.NewMessage) error {
 
 	finalPrompt := contextBuilder.String()
 
+	// Send placeholder message
+	log.Printf("[ReplyToBot] Sending placeholder...")
+	placeholder, err := m.Reply("...")
+	if err != nil {
+		log.Printf("[ReplyToBot] Failed to send placeholder: %v", err)
+		return nil
+	}
+	log.Printf("[ReplyToBot] Placeholder sent, calling Cerebras API")
+
 	// Call Cerebras API
 	reqBody := CerebrasRequest{
 		Model:       "zai-glm-4.7",
@@ -359,10 +387,11 @@ func handleReplyToBot(m *telegram.NewMessage) error {
 	}
 
 	if len(cerebrasResp.Choices) == 0 {
+		placeholder.Edit("No response from AI.")
 		return nil
 	}
 
-	m.Reply(cerebrasResp.Choices[0].Message.Content)
+	placeholder.Edit(cerebrasResp.Choices[0].Message.Content)
 	return nil
 }
 
@@ -422,19 +451,44 @@ func fetchChatHistory(chatID int64, excludeMsgID int32, limit int) []ChatMessage
 
 func getMessageByID(chatID int64, msgID int32) *ChatMessage {
 	if botClient == nil {
+		log.Printf("[getMessageByID] botClient is nil")
 		return nil
 	}
 
-	messages, err := botClient.GetHistory(chatID, &telegram.HistoryOption{
-		Limit: 1,
-		MaxID: msgID + 1,
-		MinID: msgID - 1,
+	log.Printf("[getMessageByID] Fetching msgID %d from chat %d", msgID, chatID)
+
+	// Try GetMessages first (direct fetch by ID)
+	msgs, err := botClient.GetMessages(chatID, &telegram.SearchOption{
+		IDs: []int32{msgID},
 	})
-	if err != nil || len(messages) == 0 {
+	if err != nil {
+		log.Printf("[getMessageByID] GetMessages error: %v", err)
+	} else if len(msgs) > 0 {
+		log.Printf("[getMessageByID] GetMessages returned %d messages", len(msgs))
+		for _, msg := range msgs {
+			if msg.ID == msgID {
+				return &ChatMessage{
+					Sender: getSenderFromNewMessage(&msg),
+					Text:   msg.Text(),
+				}
+			}
+		}
+	}
+
+	// Fallback to GetHistory
+	log.Printf("[getMessageByID] Trying GetHistory fallback")
+	messages, err := botClient.GetHistory(chatID, &telegram.HistoryOption{
+		Limit: 10,
+		MaxID: msgID + 1,
+	})
+	if err != nil {
+		log.Printf("[getMessageByID] GetHistory error: %v", err)
 		return nil
 	}
+	log.Printf("[getMessageByID] GetHistory returned %d messages", len(messages))
 
 	for _, msg := range messages {
+		log.Printf("[getMessageByID] Checking msg.ID=%d vs target=%d", msg.ID, msgID)
 		if msg.ID == msgID {
 			return &ChatMessage{
 				Sender: getSenderFromNewMessage(&msg),
@@ -443,6 +497,7 @@ func getMessageByID(chatID int64, msgID int32) *ChatMessage {
 		}
 	}
 
+	log.Printf("[getMessageByID] Message not found")
 	return nil
 }
 
@@ -451,18 +506,20 @@ func getRepliedMessageSenderID(chatID int64, msgID int32) int64 {
 		return 0
 	}
 
-	messages, err := botClient.GetHistory(chatID, &telegram.HistoryOption{
-		Limit: 1,
-		MaxID: msgID + 1,
-		MinID: msgID - 1,
+	// Use GetMessages with IDs for direct fetch
+	msgs, err := botClient.GetMessages(chatID, &telegram.SearchOption{
+		IDs: []int32{msgID},
 	})
-	if err != nil || len(messages) == 0 {
+	if err != nil {
+		log.Printf("[getRepliedMessageSenderID] GetMessages error: %v", err)
 		return 0
 	}
 
-	for _, msg := range messages {
+	for _, msg := range msgs {
 		if msg.ID == msgID {
-			return msg.SenderID()
+			senderID := msg.SenderID()
+			log.Printf("[getRepliedMessageSenderID] Found senderID: %d for msgID: %d", senderID, msgID)
+			return senderID
 		}
 	}
 
