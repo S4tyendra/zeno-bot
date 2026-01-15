@@ -1,12 +1,11 @@
 package modules
 
 import (
-	tele "gopkg.in/telebot.v3"
+	"github.com/amarnathcjd/gogram/telegram"
 
 	"zeno/modules/aichat"
 )
 
-func RegisterAll(b *tele.Bot) {
-	aichat.Register(b)
-
+func RegisterAll(client *telegram.Client) {
+	aichat.Register(client)
 }

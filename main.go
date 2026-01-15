@@ -2,9 +2,8 @@ package main
 
 import (
 	"log"
-	"time"
 
-	tele "gopkg.in/telebot.v3"
+	"github.com/amarnathcjd/gogram/telegram"
 
 	"zeno/config"
 	"zeno/db"
@@ -17,16 +16,25 @@ func main() {
 	db.Connect()
 	defer db.Disconnect()
 
-	b, err := tele.NewBot(tele.Settings{
-		Token:  config.BotToken,
-		Poller: &tele.LongPoller{Timeout: 10 * time.Second},
+	client, err := telegram.NewClient(telegram.ClientConfig{
+		AppID:   int32(config.AppID),
+		AppHash: config.AppHash,
+		Session: "session.dat",
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	modules.RegisterAll(b)
+	if _, err := client.Conn(); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := client.LoginBot(config.BotToken); err != nil {
+		log.Fatal(err)
+	}
+
+	modules.RegisterAll(client)
 
 	log.Println("Bot started!")
-	b.Start()
+	client.Idle()
 }
