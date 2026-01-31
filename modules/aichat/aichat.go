@@ -152,6 +152,7 @@ func handleMessage(m *telegram.NewMessage) error {
 		return nil
 	}
 
+	log.Printf("[AiChat] Handled message trigger: query=%q, chatID=%d, sender=%s", query, m.ChatID(), getSenderName(m))
 	return processAIRequest(m, query)
 }
 
@@ -190,9 +191,24 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 	}
 
 	// Parts for the AI request
-	parts := []*genai.Part{
-		{Text: contextBuilder.String()},
+	parts := []*genai.Part{}
+
+	// Check if current message has media
+	if m.Media() != nil {
+		mediaData, mimeType, fileName := downloadMedia(m)
+		if mediaData != nil {
+			log.Printf("[AiChat] Received media from user: %s (%s)", fileName, mimeType)
+			parts = append(parts, &genai.Part{
+				InlineData: &genai.Blob{
+					Data:     mediaData,
+					MIMEType: mimeType,
+				},
+			})
+			contextBuilder.WriteString(fmt.Sprintf("[User sent a file: %s]\n", fileName))
+		}
 	}
+
+	parts = append(parts, &genai.Part{Text: contextBuilder.String()})
 
 	// Handle replied message
 	if replyToMsgID != 0 {
@@ -204,10 +220,11 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 			contextBuilder.WriteString(strings.ReplaceAll(replyMsg.Text, "\n", "\\n"))
 			contextBuilder.WriteString("\n---\nYou are replying to the triggered message user.\n")
 
-			// Update the text part
-			parts[0] = &genai.Part{Text: contextBuilder.String()}
+			// Update the text part (last part is usually text if we appended correctly, but let's be safe)
+			// Actually, we appended text part *after* current media, so parts[len(parts)-1] is text.
+			parts[len(parts)-1] = &genai.Part{Text: contextBuilder.String()}
 
-			// Add media if present
+			// Add replied media if present
 			if mediaPart != nil {
 				parts = append(parts, mediaPart)
 			}
@@ -228,6 +245,7 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 	}
 
 	// Generate response
+	log.Printf("[AiChat] Calling GenAI with %d parts, prompt chars: %d", len(parts), len(contextBuilder.String()))
 	response, err := generateAIResponse(parts)
 	if err != nil {
 		log.Printf("[AiChat] GenAI error: %v", err)
@@ -236,6 +254,7 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 	}
 
 	responseText := response.Text()
+	log.Printf("[AiChat] AI response received, length: %d", len(responseText))
 	if responseText == "" {
 		placeholder.Edit("AI returned empty response.")
 		return nil
@@ -245,12 +264,14 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 	var buttons *telegram.ReplyInlineMarkup
 	if len(response.Candidates) > 0 && response.Candidates[0].GroundingMetadata != nil {
 		gm := response.Candidates[0].GroundingMetadata
+		log.Printf("[AiChat] Grounding metadata found: chunks=%d", len(gm.GroundingChunks))
 		if len(gm.GroundingChunks) > 0 {
 			// Store links in DB
 			linkID, err := storeGroundingLinks(gm.GroundingChunks)
 			if err != nil {
 				log.Printf("[AiChat] Failed to store grounding links: %v", err)
 			} else {
+				log.Printf("[AiChat] Stored %d grounding links, ID: %s", len(gm.GroundingChunks), linkID)
 				buttons = &telegram.ReplyInlineMarkup{
 					Rows: []*telegram.KeyboardButtonRow{
 						{Buttons: []telegram.KeyboardButton{
@@ -338,6 +359,7 @@ func storeGroundingLinks(chunks []*genai.GroundingChunk) (string, error) {
 
 func handleGetVertexLinks(cb *telegram.CallbackQuery) error {
 	data := string(cb.Data)
+	log.Printf("[AiChat] Callback received: %s from user %d", data, cb.Sender.ID)
 	parts := strings.Split(data, "|")
 	if len(parts) != 2 {
 		cb.Answer("Invalid request", &telegram.CallbackOptions{Alert: true})
@@ -500,16 +522,15 @@ func getMessageWithMedia(chatID int64, msgID int32) (*ChatMessage, *genai.Part) 
 	}
 
 	msg := msgs[0]
-	chatMsg := &ChatMessage{
-		Sender: getSenderFromMessage(&msg),
-		Text:   msg.Text(),
-	}
+	text := msg.Text()
 
 	// Check for media
 	var mediaPart *genai.Part
 	if msg.Media() != nil {
-		mediaData, mimeType := downloadMedia(&msg)
+		mediaData, mimeType, fileName := downloadMedia(&msg)
 		if mediaData != nil {
+			// Append file info to text
+			text = fmt.Sprintf("[File: %s] %s", fileName, text)
 			mediaPart = &genai.Part{
 				InlineData: &genai.Blob{
 					Data:     mediaData,
@@ -519,63 +540,79 @@ func getMessageWithMedia(chatID int64, msgID int32) (*ChatMessage, *genai.Part) 
 		}
 	}
 
+	chatMsg := &ChatMessage{
+		Sender: getSenderFromMessage(&msg),
+		Text:   text,
+	}
+
 	return chatMsg, mediaPart
 }
 
-func downloadMedia(msg *telegram.NewMessage) ([]byte, string) {
+func downloadMedia(msg *telegram.NewMessage) ([]byte, string, string) {
 	if msg.Message == nil || msg.Message.Media == nil {
-		return nil, ""
+		return nil, "", ""
 	}
 
-	// Get file size first
-	var fileSize int64
+	var fileName string
 	var mimeType string
 
-	switch media := msg.Message.Media.(type) {
+	switch msg.Message.Media.(type) {
 	case *telegram.MessageMediaPhoto:
-		// Photos are usually small, proceed
 		mimeType = "image/jpeg"
+		fileName = "photo.jpg"
 	case *telegram.MessageMediaDocument:
-		if media.Document != nil {
-			// Skip explicit document size check to avoid type assertion issues with interface
-			// Just rely on post-download size check
-			mimeType = "application/octet-stream"
-		}
+		// Skip inspection to avoid type errors
+		mimeType = "application/octet-stream"
 	default:
-		return nil, ""
+		return nil, "", ""
 	}
 
-	// Check size limit (skipped for documents here, checked later)
-	if fileSize > maxMediaSize {
-		log.Printf("[AiChat] Media too large: %d bytes", fileSize)
-		return nil, ""
-	}
-
-	// Download media
+	// Download media (gogram returns path)
 	path, err := botClient.DownloadMedia(msg.Message.Media, &telegram.DownloadOptions{})
 	if err != nil {
 		log.Printf("[AiChat] Failed to download media: %v", err)
-		return nil, ""
+		return nil, "", ""
 	}
 	defer os.Remove(path)
+
+	// Extract filename from download path
+	if fileName == "" || fileName == "photo.jpg" {
+		// If it's a document, we prefer the actual filename
+		extracted := extractFileName(path)
+		if extracted != "" {
+			fileName = extracted
+		}
+	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		log.Printf("[AiChat] Failed to read media file: %v", err)
-		return nil, ""
+		return nil, "", ""
 	}
 
 	// Check size after download
 	if len(data) > maxMediaSize {
 		log.Printf("[AiChat] Downloaded media too large: %d bytes", len(data))
-		return nil, ""
+		return nil, "", ""
 	}
 
 	if mimeType == "" || mimeType == "application/octet-stream" {
 		mimeType = http.DetectContentType(data)
 	}
 
-	return data, mimeType
+	return data, mimeType, fileName
+}
+
+func extractFileName(path string) string {
+	idx := strings.LastIndex(path, "/")
+	if idx != -1 {
+		return path[idx+1:]
+	}
+	idx = strings.LastIndex(path, "\\")
+	if idx != -1 {
+		return path[idx+1:]
+	}
+	return path
 }
 
 func getRepliedMessageSenderID(chatID int64, msgID int32) int64 {
