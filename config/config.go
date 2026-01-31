@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -14,6 +15,9 @@ var (
 	AppID          int
 	AppHash        string
 	AIStudioAPIKey string
+	AllowedChatIDs []int64
+	MaxMediaSize   int64
+	DefaultModel   string
 )
 
 func Load() {
@@ -47,5 +51,29 @@ func Load() {
 	AIStudioAPIKey = os.Getenv("AISTUDIO_API_KEY")
 	if AIStudioAPIKey == "" {
 		log.Fatal("AISTUDIO_API_KEY is required")
+	}
+
+	allowedChatIDsStr := os.Getenv("ALLOWED_CHAT_IDS")
+	if allowedChatIDsStr != "" {
+		ids := strings.Split(allowedChatIDsStr, ",")
+		for _, id := range ids {
+			idInt, err := strconv.ParseInt(strings.TrimSpace(id), 10, 64)
+			if err == nil {
+				AllowedChatIDs = append(AllowedChatIDs, idInt)
+			}
+		}
+	}
+
+	maxMediaSizeStr := os.Getenv("MAX_MEDIA_SIZE")
+	if maxMediaSizeStr != "" {
+		MaxMediaSize, _ = strconv.ParseInt(maxMediaSizeStr, 10, 64)
+	}
+	if MaxMediaSize == 0 {
+		MaxMediaSize = 5 * 1024 * 1024 // 5MB default
+	}
+
+	DefaultModel = os.Getenv("DEFAULT_MODEL")
+	if DefaultModel == "" {
+		DefaultModel = "gemini-2.0-flash-exp"
 	}
 }

@@ -360,7 +360,7 @@ func generateAIResponse(parts []*genai.Part) (*genai.GenerateContentResponse, er
 		{Role: genai.RoleUser, Parts: parts},
 	}
 
-	return genaiClient.Models.GenerateContent(ctx, "gemini-2.5-flash", contents, config)
+	return genaiClient.Models.GenerateContent(ctx, "gemini-3-flash-preview", contents, config)
 }
 
 func storeGroundingLinks(chunks []*genai.GroundingChunk) (string, error) {
@@ -685,7 +685,7 @@ func generateAndSendImage(req ImageRequest) {
 
 	resp, err := genaiClient.Models.GenerateContent(
 		ctx,
-		"gemini-2.5-flash-image",
+		"gemini-3-flash-preview",
 		genai.Text(req.Prompt),
 		nil,
 	)
