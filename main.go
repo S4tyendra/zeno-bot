@@ -19,7 +19,7 @@ func main() {
 	client, err := telegram.NewClient(telegram.ClientConfig{
 		AppID:   int32(config.AppID),
 		AppHash: config.AppHash,
-		Session: "session.dat",
+		Session: "data/session.dat",
 	})
 	if err != nil {
 		log.Fatal(err)
