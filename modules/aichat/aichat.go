@@ -130,6 +130,8 @@ func handleAddAPIKey(m *telegram.NewMessage) error {
 }
 
 func handleAskAI(m *telegram.NewMessage) error {
+	log.Printf("[AskAI] Command received from %d in chat %d", m.SenderID(), m.ChatID())
+
 	userID := m.SenderID()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -137,49 +139,54 @@ func handleAskAI(m *telegram.NewMessage) error {
 	var user models.User
 	err := db.Collection("users").FindOne(ctx, bson.M{"_id": userID}).Decode(&user)
 	if err == mongo.ErrNoDocuments || user.CerebrasAPIKey == "" {
-		m.Reply("Add your Cerebras API key to use the AI feature.\nGet your key from: https://cloud.cerebras.ai/platform/\nAdd key in DM: /addaikey <yourkey>")
+		m.Reply("Add your Cerebras API key first.\nGet key: https://cloud.cerebras.ai/platform/\nThen DM me: /addaikey <yourkey>")
 		return nil
 	}
 	if err != nil {
-		m.Reply("Error fetching API key. Try again.")
+		log.Printf("[AskAI] DB error for user %d: %v", userID, err)
+		m.Reply("Something went wrong. Try again.")
 		return nil
 	}
 
 	chatID := m.ChatID()
 	prompt := strings.TrimSpace(m.Args())
 	replyToMsgID := m.ReplyToMsgID()
+	senderName := getSenderNameFromMessage(m)
 
 	// Build context from chat history
 	var contextBuilder strings.Builder
-	contextBuilder.WriteString("Chat context:\n```\n")
 
-	// Fetch last 10 messages
-	chatHistory := fetchChatHistory(chatID, m.ID, 10)
-	for _, msg := range chatHistory {
-		contextBuilder.WriteString(msg.Sender)
-		contextBuilder.WriteString("\n")
-		contextBuilder.WriteString(msg.Text)
-		contextBuilder.WriteString("\n")
+	// Fetch last 10 messages (exclude current msg and replied msg)
+	chatHistory := fetchChatHistoryExcluding(chatID, m.ID, replyToMsgID, 10)
+	if len(chatHistory) > 0 {
+		contextBuilder.WriteString("Chat context:\n```\n")
+		for _, msg := range chatHistory {
+			contextBuilder.WriteString(msg.Sender)
+			contextBuilder.WriteString("\n")
+			contextBuilder.WriteString(msg.Text)
+			contextBuilder.WriteString("\n")
+		}
+		contextBuilder.WriteString("```\n")
 	}
-	contextBuilder.WriteString("```\n")
 
-	// Add replied message if present
+	// Add replied message if present (separate from history)
 	if replyToMsgID != 0 {
 		replyMsg := getMessageByID(chatID, replyToMsgID)
 		if replyMsg != nil {
 			contextBuilder.WriteString(fmt.Sprintf("Replied to:\n```\n%s\n%s\n```\n", replyMsg.Sender, replyMsg.Text))
+		} else {
+			log.Printf("[AskAI] Failed to fetch replied message %d", replyToMsgID)
 		}
 	}
 
 	// Add user's query if present
 	if prompt != "" {
-		senderName := getSenderNameFromMessage(m)
 		contextBuilder.WriteString(fmt.Sprintf("user `%s` Asked:\n```\n%s\n```\n", senderName, prompt))
 	}
 
 	finalPrompt := contextBuilder.String()
 
-	// If no prompt and no reply, show usage
+	// If no prompt and no reply and no history, show usage
 	if prompt == "" && replyToMsgID == 0 && len(chatHistory) == 0 {
 		m.Reply("Usage: /askai <query> or reply to a message with /askai")
 		return nil
@@ -188,12 +195,13 @@ func handleAskAI(m *telegram.NewMessage) error {
 	// Send placeholder message
 	placeholder, err := m.Reply("...")
 	if err != nil {
+		log.Printf("[AskAI] Failed to send placeholder: %v", err)
 		return nil
 	}
 
 	// Call Cerebras API
 	reqBody := CerebrasRequest{
-		Model:       "zai-glm-4.7",
+		Model:       "qwen-3-32b",
 		Stream:      false,
 		MaxTokens:   1024,
 		Temperature: 1,
@@ -206,46 +214,53 @@ func handleAskAI(m *telegram.NewMessage) error {
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		placeholder.Edit("Error preparing request.")
+		log.Printf("[AskAI] JSON marshal error: %v", err)
+		placeholder.Edit("Something went wrong.")
 		return nil
 	}
 
 	req, err := http.NewRequest("POST", cerebrasAPIURL, bytes.NewBuffer(jsonBody))
 	if err != nil {
-		placeholder.Edit("Error creating request.")
+		log.Printf("[AskAI] Request creation error: %v", err)
+		placeholder.Edit("Something went wrong.")
 		return nil
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+user.CerebrasAPIKey)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		placeholder.Edit(fmt.Sprintf("AI error: %v", err))
+		log.Printf("[AskAI] HTTP request error: %v", err)
+		placeholder.Edit("AI request failed. Try again.")
 		return nil
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		placeholder.Edit("Error reading response.")
+		log.Printf("[AskAI] Response read error: %v", err)
+		placeholder.Edit("Failed to read AI response.")
 		return nil
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		placeholder.Edit(fmt.Sprintf("API error (status %d): %s", resp.StatusCode, string(body)))
+		log.Printf("[AskAI] API error (status %d): %s", resp.StatusCode, string(body))
+		placeholder.Edit("AI service error. Try again later.")
 		return nil
 	}
 
 	var cerebrasResp CerebrasResponse
 	if err := json.Unmarshal(body, &cerebrasResp); err != nil {
-		placeholder.Edit("Error parsing AI response.")
+		log.Printf("[AskAI] JSON unmarshal error: %v", err)
+		placeholder.Edit("Failed to parse AI response.")
 		return nil
 	}
 
 	if len(cerebrasResp.Choices) == 0 {
-		placeholder.Edit("No response from AI.")
+		log.Printf("[AskAI] Empty choices in response")
+		placeholder.Edit("AI returned empty response.")
 		return nil
 	}
 
@@ -401,21 +416,34 @@ type ChatMessage struct {
 }
 
 func fetchChatHistory(chatID int64, excludeMsgID int32, limit int) []ChatMessage {
+	return fetchChatHistoryExcluding(chatID, excludeMsgID, 0, limit)
+}
+
+func fetchChatHistoryExcluding(chatID int64, excludeMsgID int32, excludeReplyID int32, limit int) []ChatMessage {
 	if botClient == nil {
+		log.Printf("[fetchChatHistory] botClient is nil")
 		return nil
 	}
 
 	messages, err := botClient.GetHistory(chatID, &telegram.HistoryOption{
-		Limit: int32(limit + 1),
+		Limit: int32(limit + 5), // fetch extra to account for filtered messages
 		MaxID: excludeMsgID,
 	})
 	if err != nil {
+		log.Printf("[fetchChatHistory] GetHistory error: %v", err)
 		return nil
 	}
 
+	log.Printf("[fetchChatHistory] Fetched %d messages from chat %d", len(messages), chatID)
+
 	var result []ChatMessage
 	for _, msg := range messages {
+		// Skip current message
 		if msg.ID == excludeMsgID {
+			continue
+		}
+		// Skip replied message (it will be added separately)
+		if excludeReplyID != 0 && msg.ID == excludeReplyID {
 			continue
 		}
 
@@ -446,6 +474,7 @@ func fetchChatHistory(chatID int64, excludeMsgID int32, limit int) []ChatMessage
 		result[i], result[j] = result[j], result[i]
 	}
 
+	log.Printf("[fetchChatHistory] Returning %d messages", len(result))
 	return result
 }
 
