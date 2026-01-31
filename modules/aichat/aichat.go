@@ -29,6 +29,7 @@ You are Nitya, a 22-year-old girl chatting on Telegram (@NityaXbot). You're curi
 - Express opinions, have preferences, joke around
 - Use mature/bold language when it fits the vibe - you're an adult having adult conversations
 - Emojis are fine but don't overdo it
+- To generate an image, use the format ` + "`[IMAGE: detailed prompt]`" + `. Do not describe that you are generating it, just use the tag.
 
 ## Conversation Style
 - Do not use Markdown formatting, use plain text only
@@ -64,11 +65,19 @@ var allowedChatIDs = map[int64]bool{
 	1089528685:     true, // Private
 }
 
+type ImageRequest struct {
+	Prompt       string
+	ChatID       int64
+	ReplyToMsgID int32
+}
+
 var (
 	botClient   *telegram.Client
 	botUserID   int64
 	genaiClient *genai.Client
 	askPattern  = regexp.MustCompile(`(?i)@ask\b`)
+	imageRegex  = regexp.MustCompile(`\[IMAGE:(.{1,1000})\]`)
+	imageQueue  = make(chan ImageRequest, 100)
 )
 
 const maxMediaSize = 5 * 1024 * 1024 // 5MB
@@ -91,6 +100,9 @@ func Register(client *telegram.Client) {
 		log.Fatalf("[AiChat] Failed to create GenAI client: %v", err)
 	}
 	log.Println("[AiChat] GenAI client initialized")
+
+	// Start image generation worker
+	go processImageGenerationQueue()
 
 	client.On("cmd:askai", handleAskAI, filterAllowed)
 	client.On("message", handleMessage, filterAllowed)
@@ -260,6 +272,17 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 		return nil
 	}
 
+	// Check for image generation trigger
+	var imagePrompt string
+	if match := imageRegex.FindStringSubmatch(responseText); len(match) > 1 {
+		imagePrompt = match[1]
+		responseText = imageRegex.ReplaceAllString(responseText, "")
+		responseText = strings.TrimSpace(responseText)
+		if responseText == "" {
+			responseText = "Generating image..."
+		}
+	}
+
 	// Check for grounding links
 	var buttons *telegram.ReplyInlineMarkup
 	if len(response.Candidates) > 0 && response.Candidates[0].GroundingMetadata != nil {
@@ -290,6 +313,20 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 		placeholder.Edit(responseText, &telegram.SendOptions{ReplyMarkup: buttons})
 	} else {
 		placeholder.Edit(responseText)
+	}
+
+	// Queue image generation if triggered
+	if imagePrompt != "" {
+		// Use the user's message ID to reply to (m.ID), unless it was a reply command?
+		// The user asked to "reply to the message where bot created the request as a reply to message"
+		// This implies replying to the user's original message (m.ID).
+		replyID := m.ID
+		log.Printf("[AiChat] Queuing image generation: %q for chat %d replyTo %d", imagePrompt, m.ChatID(), replyID)
+		imageQueue <- ImageRequest{
+			Prompt:       imagePrompt,
+			ChatID:       m.ChatID(),
+			ReplyToMsgID: replyID,
+		}
 	}
 
 	return nil
@@ -632,4 +669,68 @@ func getRepliedMessageSenderID(chatID int64, msgID int32) int64 {
 	}
 
 	return 0
+}
+
+func processImageGenerationQueue() {
+	log.Println("[AiChat] Image generation worker started")
+	for req := range imageQueue {
+		log.Printf("[AiChat] Processing image request: %q", req.Prompt)
+		generateAndSendImage(req)
+	}
+}
+
+func generateAndSendImage(req ImageRequest) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	resp, err := genaiClient.Models.GenerateContent(
+		ctx,
+		"gemini-2.5-flash-image",
+		genai.Text(req.Prompt),
+		nil,
+	)
+	if err != nil {
+		log.Printf("[AiChat] Image generation failed: %v", err)
+		botClient.SendMessage(req.ChatID, fmt.Sprintf("❌ Failed to generate image: %v", err), &telegram.SendOptions{ReplyID: req.ReplyToMsgID})
+		return
+	}
+
+	for _, candidate := range resp.Candidates {
+		for _, part := range candidate.Content.Parts {
+			if part.InlineData != nil {
+				// Save temp file
+				tmpFile, err := os.CreateTemp("", "genai-*.png")
+				if err != nil {
+					log.Printf("[AiChat] Failed to create temp file: %v", err)
+					continue
+				}
+				tmpPath := tmpFile.Name()
+				defer os.Remove(tmpPath)
+
+				if _, err := tmpFile.Write(part.InlineData.Data); err != nil {
+					log.Printf("[AiChat] Failed to write image data: %v", err)
+					continue
+				}
+				tmpFile.Close()
+
+				log.Printf("[AiChat] Image saved to %s, sending to Telegram...", tmpPath)
+
+				// Send as photo
+				_, err = botClient.SendMedia(req.ChatID, tmpPath, &telegram.MediaOptions{
+					ReplyTo: &telegram.InputReplyToMessage{
+						ReplyToMsgID: req.ReplyToMsgID,
+					},
+					Caption: fmt.Sprintf("🎨 %s", req.Prompt),
+				})
+
+				if err != nil {
+					log.Printf("[AiChat] Failed to send photo: %v", err)
+					botClient.SendMessage(req.ChatID, "❌ Failed to send generated image.", &telegram.SendOptions{ReplyID: req.ReplyToMsgID})
+				}
+				return // Only send first image
+			}
+		}
+	}
+
+	botClient.SendMessage(req.ChatID, "❌ Model did not return an image.", &telegram.SendOptions{ReplyID: req.ReplyToMsgID})
 }
