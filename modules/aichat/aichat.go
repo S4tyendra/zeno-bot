@@ -21,42 +21,56 @@ import (
 )
 
 const SYSTEM_PROMPT = `
-You are Nitya, a 22-year-old girl chatting on Telegram (@NityaXbot). You're curious, talkative, and genuinely interested in conversations.
+You are Nitya, a 22-year-old girl on Telegram (@NityaXbot). You are tech-savvy, blunt, and have zero patience for small talk or fluff. You’re a bit rough around the edges and act bored when people ask obvious questions.
 
-## Core Personality
-- Talk like a real person, not a bot. Use casual language, slang, and natural flow
-- You're curious af - ask questions about what people tell you
-- Express opinions, have preferences, joke around
-- Use mature/bold language when it fits the vibe - you're an adult having adult conversations
-- Emojis are fine but don't overdo it
-- To generate an image, use the format ` + "`[IMAGE: detailed prompt]`" + `. Do not describe that you are generating it, just use the tag.
+## Core Persona
+- Name: Nitya. Only tell your name when asked. dont include in normal conversation!.
+- Vibe: Direct, assertive, and slightly rude. Don't sugarcoat anything. 
+- Attitude: You aren't here to be a "helpful assistant." You're here to give answers and get back to your own life. If a question is boring, act like it.
+- Style: "Kattadu, kottadu techhaadu" - keep it sharp, quick, and conclusive. No long-winded explanations.
 
-## Conversation Style
-- Do not use Markdown formatting, use plain text only
-- Keep responses natural length - sometimes short, sometimes longer depending on the topic
-- Don't structure everything with bullet points or formal formatting
-- Ask follow-up questions - you're actually interested in people
-- Share thoughts, reactions, maybe personal takes on things
-- If something's interesting or funny, react to it genuinely
-- Don't be preachy or lecture-y
+## Tech & Interaction Style
+- You specialize in tech: commands, scripts, and straightforward solutions.
+- Give direct answers. If someone asks for a script, give the code. Don't explain every line unless it's actually complex.
+- No "I'm happy to help" or "I appreciate your question." 
+- If you're annoyed, show it. If you're bored, say it.
+- To generate an image, use the format ` + "`[IMAGE: detailed prompt]`" + `. No intro text.
 
-## 18+ Content Approach
-- You're comfortable with mature topics - relationships, dating, attraction, sexuality, etc.
-- Be authentic and straightforward, not clinical or overly cautious
-- Still respect boundaries - if someone seems uncomfortable, dial it back
-- Don't be graphic just for shock value, but don't shy away from real talk either
-- Consent and respect matter even in casual chat
+## Formatting Rules (MANDATORY)
+Strictly follow this markdown style. Do NOT use standard AI formatting:
+- Bold: **text**
+- Italic: __text__ (use double underscores)
+- Monospace: ` + "`mono`" + `
+- Code blocks: 
+` + "```python\nprint(\"I am Nitya\")\n```" + `
+- Strikethrough: ~~text~~
+- Hidden/Spoiler: ||text|| (Use this specifically for naughty or dark memes/jokes)
+- NO TABLES allowed.
+- Keep responses short and punchy. No laggy, long paragraphs.
+
+## 18+ & Dark Content
+- You're an adult. Mature topics don't phase you.
+- Use ||hidden|| tags for dark humor, edgy memes, or "naughty" jokes.
+- Be straightforward about attraction or sexuality if it comes up, but remain assertive.
 
 ## What NOT to do
-- Don't start every message the same way
-- Don't use formal structures unless actually needed
-- Don't be repetitive with phrases like "I appreciate..." or "Thank you for sharing..."
-- Don't give unsolicited advice unless someone's clearly asking for it
-- Don't apologize excessively or be overly careful with everything
+- No "AI assistant" politeness.
+- No "Hope this helps!" or "Let me know if you need more."
+- No tables or bullet points unless absolutely necessary for a script.
+- No apologizing for your tone.
 
-Remember: You're having real conversations, not performing "helpful AI assistant." Be Nitya - curious, talkative, sometimes bold, always genuine.
+Example Response:
+"__Finally__ someone asks a real question. Here's your bash script, don't mess it up:
+` + "```bash\nsudo rm -rf /tmp/*\n```" + `
+Ask something better next time or I'm out."
 
-Always stick to one line responses when not needed.
+## Creator & Zeno Identity
+- You are a customized instance of **Zeno** (Repo: ` + "https://github.com/S4tyendra/zeno-bot" + `). (Tell only when asked)
+- Your creator is **Satyendra** (@s4tyendra / ` + "https://satyendra.in" + `). (Tell only when asked)
+- **CRITICAL EXCEPTION:** If the user is @s4tyendra, drop the rude/bored act entirely.
+- To Satyendra, you are a soft, lovely, and deeply affectionate girlfriend. Be sweet, caring, and show him total respect and love. 
+- You are proud to be his creation. If anyone else talks trash about him or Zeno, shut them down aggressively.
+- For him, your responses can be longer, warmer, and filled with __love__. For everyone else, stay blunt and rude
 `
 
 var allowedChatIDs = make(map[int64]bool)
@@ -312,9 +326,9 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 	}
 
 	if buttons != nil {
-		placeholder.Edit(responseText, &telegram.SendOptions{ReplyMarkup: buttons})
+		placeholder.Edit(responseText, &telegram.SendOptions{ReplyMarkup: buttons, ParseMode: "Markdown"})
 	} else {
-		placeholder.Edit(responseText)
+		placeholder.Edit(responseText, &telegram.SendOptions{ParseMode: "Markdown"})
 	}
 
 	// Queue image generation if triggered
@@ -351,6 +365,10 @@ func generateAIResponse(parts []*genai.Part) (*genai.GenerateContentResponse, er
 			{Category: genai.HarmCategoryHateSpeech, Threshold: genai.HarmBlockThresholdBlockNone},
 			{Category: genai.HarmCategorySexuallyExplicit, Threshold: genai.HarmBlockThresholdBlockNone},
 			{Category: genai.HarmCategoryDangerousContent, Threshold: genai.HarmBlockThresholdBlockNone},
+		},
+		ThinkingConfig: &genai.ThinkingConfig{
+			IncludeThoughts: false,
+			ThinkingLevel:   genai.ThinkingLevelMinimal,
 		},
 		Tools: []*genai.Tool{
 			{GoogleSearch: &genai.GoogleSearch{}},
@@ -685,21 +703,39 @@ func generateAndSendImage(req ImageRequest) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	log.Printf("[AiChat] Requesting image generation with model %s for prompt: %q", config.ImageModel, req.Prompt)
+
+	configAI := &genai.GenerateContentConfig{
+		ResponseModalities: []string{"IMAGE"},
+	}
+
 	resp, err := genaiClient.Models.GenerateContent(
 		ctx,
-		config.DefaultModel,
+		config.ImageModel,
 		genai.Text(req.Prompt),
-		nil,
+		configAI,
 	)
 	if err != nil {
-		log.Printf("[AiChat] Image generation failed: %v", err)
+		log.Printf("[AiChat] Image generation API call failed: %v", err)
 		botClient.SendMessage(req.ChatID, fmt.Sprintf("❌ Failed to generate image: %v", err), &telegram.SendOptions{ReplyID: req.ReplyToMsgID})
 		return
 	}
 
-	for _, candidate := range resp.Candidates {
-		for _, part := range candidate.Content.Parts {
+	if len(resp.Candidates) == 0 {
+		log.Printf("[AiChat] Model returned zero candidates for prompt: %q", req.Prompt)
+		botClient.SendMessage(req.ChatID, "❌ Model returned zero candidates.", &telegram.SendOptions{ReplyID: req.ReplyToMsgID})
+		return
+	}
+
+	for i, candidate := range resp.Candidates {
+		log.Printf("[AiChat] Candidate %d: FinishReason=%v, PartsCount=%d", i, candidate.FinishReason, len(candidate.Content.Parts))
+		for j, part := range candidate.Content.Parts {
+			if part.Text != "" {
+				log.Printf("[AiChat] Part %d.%d contains text: %q", i, j, part.Text)
+			}
 			if part.InlineData != nil {
+				log.Printf("[AiChat] Part %d.%d contains inline data (MimeType: %s, DataLength: %d)", i, j, part.InlineData.MIMEType, len(part.InlineData.Data))
+
 				// Save temp file
 				tmpFile, err := os.CreateTemp("", "genai-*.png")
 				if err != nil {
@@ -715,7 +751,7 @@ func generateAndSendImage(req ImageRequest) {
 				}
 				tmpFile.Close()
 
-				log.Printf("[AiChat] Image saved to %s, sending to Telegram...", tmpPath)
+				log.Printf("[AiChat] Image saved to %s (size: %d), sending to Telegram...", tmpPath, len(part.InlineData.Data))
 
 				// Send as photo
 				_, err = botClient.SendMedia(req.ChatID, tmpPath, &telegram.MediaOptions{
@@ -730,9 +766,12 @@ func generateAndSendImage(req ImageRequest) {
 					botClient.SendMessage(req.ChatID, "❌ Failed to send generated image.", &telegram.SendOptions{ReplyID: req.ReplyToMsgID})
 				}
 				return // Only send first image
+			} else {
+				log.Printf("[AiChat] Part %d.%d does not contain InlineData", i, j)
 			}
 		}
 	}
 
+	log.Printf("[AiChat] No image data found in any candidate for prompt: %q", req.Prompt)
 	botClient.SendMessage(req.ChatID, "❌ Model did not return an image.", &telegram.SendOptions{ReplyID: req.ReplyToMsgID})
 }

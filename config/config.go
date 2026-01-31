@@ -18,6 +18,7 @@ var (
 	AllowedChatIDs []int64
 	MaxMediaSize   int64
 	DefaultModel   string
+	ImageModel     string
 )
 
 func Load() {
@@ -74,6 +75,11 @@ func Load() {
 
 	DefaultModel = os.Getenv("DEFAULT_MODEL")
 	if DefaultModel == "" {
-		DefaultModel = "gemini-2.0-flash-exp"
+		DefaultModel = "gemini-3.0-flash-preview"
+	}
+
+	ImageModel = os.Getenv("IMAGE_MODEL")
+	if ImageModel == "" {
+		ImageModel = "gemini-2.5-flash-image"
 	}
 }

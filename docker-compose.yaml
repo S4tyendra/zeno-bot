@@ -1,0 +1,31 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: zeno-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - MONGODB_URL=mongodb://db:27017
+    volumes:
+      - ./session.dat:/app/session.dat
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: mongo:latest
+    container_name: zeno-db
+    restart: unless-stopped
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mongodb_data:
