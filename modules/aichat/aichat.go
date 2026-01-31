@@ -1,21 +1,21 @@
 package aichat
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
+	"os"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/amarnathcjd/gogram/telegram"
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"google.golang.org/genai"
 
+	"zeno/config"
 	"zeno/db"
 	"zeno/models"
 )
@@ -58,390 +58,388 @@ Remember: You're having real conversations, not performing "helpful AI assistant
 Always stick to one line responses when not needed.
 `
 
-const cerebrasAPIURL = "https://api.cerebras.ai/v1/chat/completions"
-
-type CerebrasRequest struct {
-	Model       string    `json:"model"`
-	Stream      bool      `json:"stream"`
-	MaxTokens   int       `json:"max_tokens"`
-	Temperature float64   `json:"temperature"`
-	TopP        float64   `json:"top_p"`
-	Messages    []Message `json:"messages"`
+// Allowed chat IDs
+var allowedChatIDs = map[int64]bool{
+	-1001426113453: true, // Group
+	1089528685:     true, // Private
 }
 
-type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
+var (
+	botClient   *telegram.Client
+	botUserID   int64
+	genaiClient *genai.Client
+	askPattern  = regexp.MustCompile(`(?i)@ask\b`)
+)
 
-type CerebrasResponse struct {
-	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	} `json:"choices"`
-}
-
-var botClient *telegram.Client
-var botUserID int64
+const maxMediaSize = 5 * 1024 * 1024 // 5MB
 
 func Register(client *telegram.Client) {
 	botClient = client
 
-	// Get bot's own user ID
 	me, err := client.GetMe()
 	if err == nil && me != nil {
 		botUserID = me.ID
 	}
 
-	client.On("cmd:addaikey", handleAddAPIKey, telegram.FilterPrivate)
-	client.On("cmd:askai", handleAskAI, telegram.FilterGroup)
-	client.On("message", handleReplyToBot, telegram.FilterGroup)
+	// Initialize GenAI client
+	ctx := context.Background()
+	genaiClient, err = genai.NewClient(ctx, &genai.ClientConfig{
+		APIKey:  config.AIStudioAPIKey,
+		Backend: genai.BackendGeminiAPI,
+	})
+	if err != nil {
+		log.Fatalf("[AiChat] Failed to create GenAI client: %v", err)
+	}
+	log.Println("[AiChat] GenAI client initialized")
+
+	client.On("cmd:askai", handleAskAI, filterAllowed)
+	client.On("message", handleMessage, filterAllowed)
+	client.On("callback:get_vertex_links", handleGetVertexLinks)
 }
 
-func handleAddAPIKey(m *telegram.NewMessage) error {
-	args := strings.TrimSpace(m.Args())
-	if args == "" {
-		m.Reply("Usage: /addaikey <your_cerebras_api_key>\n\nGet your API key from: https://cloud.cerebras.ai/platform/")
-		return nil
-	}
-
-	userID := m.SenderID()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := db.Collection("users").UpdateOne(
-		ctx,
-		bson.M{"_id": userID},
-		bson.M{"$set": bson.M{"cerebras_api_key": args}},
-		options.Update().SetUpsert(true),
-	)
-	if err != nil {
-		m.Reply("Error saving API key. Try again.")
-		return nil
-	}
-
-	m.Reply("Cerebras API key saved successfully! You can now use /askai in groups.")
-	return nil
+func filterAllowed(m *telegram.NewMessage) bool {
+	chatID := m.ChatID()
+	return allowedChatIDs[chatID]
 }
 
 func handleAskAI(m *telegram.NewMessage) error {
-	log.Printf("[AskAI] Command received from %d in chat %d", m.SenderID(), m.ChatID())
+	return processAIRequest(m, m.Args())
+}
 
-	userID := m.SenderID()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+func handleMessage(m *telegram.NewMessage) error {
+	text := m.Text()
 
-	var user models.User
-	err := db.Collection("users").FindOne(ctx, bson.M{"_id": userID}).Decode(&user)
-	if err == mongo.ErrNoDocuments || user.CerebrasAPIKey == "" {
-		m.Reply("Add your Cerebras API key first.\nGet key: https://cloud.cerebras.ai/platform/\nThen DM me: /addaikey <yourkey>")
-		return nil
-	}
-	if err != nil {
-		log.Printf("[AskAI] DB error for user %d: %v", userID, err)
-		m.Reply("Something went wrong. Try again.")
+	// Skip commands
+	if strings.HasPrefix(text, "/") {
 		return nil
 	}
 
+	triggered := false
+	var query string
+
+	// Check if @ask is in the message
+	if askPattern.MatchString(text) {
+		triggered = true
+		query = askPattern.ReplaceAllString(text, "")
+		query = strings.TrimSpace(query)
+	}
+
+	// Check if replied to bot
+	if !triggered && m.ReplyToMsgID() != 0 {
+		repliedSenderID := getRepliedMessageSenderID(m.ChatID(), m.ReplyToMsgID())
+		if repliedSenderID == botUserID {
+			triggered = true
+			query = text
+		}
+	}
+
+	// Check if bot is tagged (mentioned)
+	if !triggered && m.Message != nil {
+		for _, entity := range m.Message.Entities {
+			if mention, ok := entity.(*telegram.MessageEntityMention); ok {
+				mentionText := text[mention.Offset : mention.Offset+mention.Length]
+				if strings.EqualFold(mentionText, "@NityaXbot") {
+					triggered = true
+					query = strings.Replace(text, mentionText, "", 1)
+					query = strings.TrimSpace(query)
+					break
+				}
+			}
+		}
+	}
+
+	if !triggered {
+		return nil
+	}
+
+	return processAIRequest(m, query)
+}
+
+func processAIRequest(m *telegram.NewMessage, query string) error {
 	chatID := m.ChatID()
-	prompt := strings.TrimSpace(m.Args())
 	replyToMsgID := m.ReplyToMsgID()
-	senderName := getSenderNameFromMessage(m)
 
-	// Build context from chat history
+	// Determine history limit based on chat type
+	historyLimit := 20 // group default
+	if m.IsPrivate() {
+		historyLimit = 30
+	}
+
+	// Build context
 	var contextBuilder strings.Builder
 
-	// Fetch last 10 messages (exclude current msg and replied msg)
-	chatHistory := fetchChatHistoryExcluding(chatID, m.ID, replyToMsgID, 10)
+	// Fetch chat history
+	chatHistory := fetchChatHistoryExcluding(chatID, m.ID, replyToMsgID, historyLimit)
 	if len(chatHistory) > 0 {
-		contextBuilder.WriteString("Chat context:\n```\n")
 		for _, msg := range chatHistory {
 			contextBuilder.WriteString(msg.Sender)
-			contextBuilder.WriteString("\n")
-			contextBuilder.WriteString(msg.Text)
+			contextBuilder.WriteString(": ")
+			contextBuilder.WriteString(strings.ReplaceAll(msg.Text, "\n", "\\n"))
 			contextBuilder.WriteString("\n")
 		}
-		contextBuilder.WriteString("```\n")
+		contextBuilder.WriteString("----\n")
 	}
 
-	// Add replied message if present (separate from history)
+	// Add triggered message
+	senderName := getSenderName(m)
+	if query != "" {
+		contextBuilder.WriteString(senderName)
+		contextBuilder.WriteString(": ")
+		contextBuilder.WriteString(strings.ReplaceAll(query, "\n", "\\n"))
+		contextBuilder.WriteString("\n")
+	}
+
+	// Parts for the AI request
+	parts := []*genai.Part{
+		{Text: contextBuilder.String()},
+	}
+
+	// Handle replied message
 	if replyToMsgID != 0 {
-		replyMsg := getMessageByID(chatID, replyToMsgID)
+		replyMsg, mediaPart := getMessageWithMedia(chatID, replyToMsgID)
 		if replyMsg != nil {
-			contextBuilder.WriteString(fmt.Sprintf("Replied to:\n```\n%s\n%s\n```\n", replyMsg.Sender, replyMsg.Text))
-		} else {
-			log.Printf("[AskAI] Failed to fetch replied message %d", replyToMsgID)
+			contextBuilder.WriteString("---\n")
+			contextBuilder.WriteString(replyMsg.Sender)
+			contextBuilder.WriteString(": ")
+			contextBuilder.WriteString(strings.ReplaceAll(replyMsg.Text, "\n", "\\n"))
+			contextBuilder.WriteString("\n---\nYou are replying to the triggered message user.\n")
+
+			// Update the text part
+			parts[0] = &genai.Part{Text: contextBuilder.String()}
+
+			// Add media if present
+			if mediaPart != nil {
+				parts = append(parts, mediaPart)
+			}
 		}
 	}
 
-	// Add user's query if present
-	if prompt != "" {
-		contextBuilder.WriteString(fmt.Sprintf("user `%s` Asked:\n```\n%s\n```\n", senderName, prompt))
-	}
-
-	finalPrompt := contextBuilder.String()
-
-	// log.Printf("[ReplyToBot] Final prompt:\n%s", finalPrompt)
-
-	// If no prompt and no reply and no history, show usage
-	if prompt == "" && replyToMsgID == 0 && len(chatHistory) == 0 {
-		m.Reply("Usage: /askai <query> or reply to a message with /askai")
+	// If no content
+	if query == "" && replyToMsgID == 0 && len(chatHistory) == 0 {
+		m.Reply("Usage: /askai <query> or reply to a message with @ask")
 		return nil
 	}
 
-	// Send placeholder message
+	// Send placeholder
 	placeholder, err := m.Reply("...")
 	if err != nil {
-		log.Printf("[AskAI] Failed to send placeholder: %v", err)
+		log.Printf("[AiChat] Failed to send placeholder: %v", err)
 		return nil
 	}
 
-	// Call Cerebras API
-	log.Printf("[AskAI] Calling Cerebras API with model: %s, prompt length: %d", "gpt-oss-120b", len(finalPrompt))
-	reqBody := CerebrasRequest{
-		Model:       "gpt-oss-120b",
-		Stream:      false,
-		MaxTokens:   1024,
-		Temperature: 1,
-		TopP:        0.95,
-		Messages: []Message{
-			{Role: "system", Content: SYSTEM_PROMPT},
-			{Role: "user", Content: finalPrompt},
-		},
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
+	// Generate response
+	response, err := generateAIResponse(parts)
 	if err != nil {
-		log.Printf("[AskAI] JSON marshal error: %v", err)
-		placeholder.Edit("Something went wrong.")
+		log.Printf("[AiChat] GenAI error: %v", err)
+		placeholder.Edit("Something went wrong. Try again later.")
 		return nil
 	}
 
-	req, err := http.NewRequest("POST", cerebrasAPIURL, bytes.NewBuffer(jsonBody))
-	if err != nil {
-		log.Printf("[AskAI] Request creation error: %v", err)
-		placeholder.Edit("Something went wrong.")
-		return nil
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+user.CerebrasAPIKey)
-
-	httpClient := &http.Client{Timeout: 30 * time.Second}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		log.Printf("[AskAI] HTTP request error: %v", err)
-		placeholder.Edit("AI request failed. Try again.")
-		return nil
-	}
-	defer resp.Body.Close()
-	log.Printf("[AskAI] API response status: %d", resp.StatusCode)
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("[AskAI] Response read error: %v", err)
-		placeholder.Edit("Failed to read AI response.")
-		return nil
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("[AskAI] API error (status %d): %s", resp.StatusCode, string(body))
-		placeholder.Edit("AI service error. Try again later.")
-		return nil
-	}
-
-	log.Printf("[AskAI] API response body length: %d bytes", len(body))
-
-	var cerebrasResp CerebrasResponse
-	if err := json.Unmarshal(body, &cerebrasResp); err != nil {
-		log.Printf("[AskAI] JSON unmarshal error: %v", err)
-		placeholder.Edit("Failed to parse AI response.")
-		return nil
-	}
-
-	if len(cerebrasResp.Choices) == 0 {
-		log.Printf("[AskAI] Empty choices in response")
+	responseText := response.Text()
+	if responseText == "" {
 		placeholder.Edit("AI returned empty response.")
 		return nil
 	}
 
-	placeholder.Edit(cerebrasResp.Choices[0].Message.Content)
+	// Check for grounding links
+	var buttons *telegram.ReplyInlineMarkup
+	if len(response.Candidates) > 0 && response.Candidates[0].GroundingMetadata != nil {
+		gm := response.Candidates[0].GroundingMetadata
+		if len(gm.GroundingChunks) > 0 {
+			// Store links in DB
+			linkID, err := storeGroundingLinks(gm.GroundingChunks)
+			if err != nil {
+				log.Printf("[AiChat] Failed to store grounding links: %v", err)
+			} else {
+				buttons = &telegram.ReplyInlineMarkup{
+					Rows: []*telegram.KeyboardButtonRow{
+						{Buttons: []telegram.KeyboardButton{
+							&telegram.KeyboardButtonCallback{
+								Text: "Get grounded links",
+								Data: []byte("get_vertex_links|" + linkID),
+							},
+						}},
+					},
+				}
+			}
+		}
+	}
+
+	if buttons != nil {
+		placeholder.Edit(responseText, &telegram.SendOptions{ReplyMarkup: buttons})
+	} else {
+		placeholder.Edit(responseText)
+	}
+
 	return nil
 }
 
-// handleReplyToBot triggers AI when someone replies to a bot message
-func handleReplyToBot(m *telegram.NewMessage) error {
-	log.Printf("[ReplyToBot] Received message: %q from %d in chat %d", m.Text(), m.SenderID(), m.ChatID())
+func generateAIResponse(parts []*genai.Part) (*genai.GenerateContentResponse, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
-	// Skip if it's a command
-	text := m.Text()
-	if strings.HasPrefix(text, "/") {
-		log.Printf("[ReplyToBot] Skipping command message")
-		return nil
+	config := &genai.GenerateContentConfig{
+		SystemInstruction: &genai.Content{
+			Role:  genai.RoleModel,
+			Parts: []*genai.Part{{Text: SYSTEM_PROMPT}},
+		},
+		Temperature:     genai.Ptr(float32(0.9)),
+		TopP:            genai.Ptr(float32(0.95)),
+		MaxOutputTokens: int32(1024),
+		SafetySettings: []*genai.SafetySetting{
+			{Category: genai.HarmCategoryHarassment, Threshold: genai.HarmBlockThresholdBlockNone},
+			{Category: genai.HarmCategoryHateSpeech, Threshold: genai.HarmBlockThresholdBlockNone},
+			{Category: genai.HarmCategorySexuallyExplicit, Threshold: genai.HarmBlockThresholdBlockNone},
+			{Category: genai.HarmCategoryDangerousContent, Threshold: genai.HarmBlockThresholdBlockNone},
+		},
+		Tools: []*genai.Tool{
+			{GoogleSearch: &genai.GoogleSearch{}},
+		},
+		ResponseModalities: []string{"TEXT"},
 	}
 
-	// Check if this is a reply to a message
-	replyToMsgID := m.ReplyToMsgID()
-	if replyToMsgID == 0 {
-		log.Printf("[ReplyToBot] Not a reply, skipping")
-		return nil
+	contents := []*genai.Content{
+		{Role: genai.RoleUser, Parts: parts},
 	}
-	log.Printf("[ReplyToBot] Is reply to msgID: %d", replyToMsgID)
 
-	// Check if the replied message is from the bot
-	replyMsg := getMessageByID(m.ChatID(), replyToMsgID)
-	if replyMsg == nil {
-		log.Printf("[ReplyToBot] Could not fetch replied message")
-		return nil
+	return genaiClient.Models.GenerateContent(ctx, "gemini-2.5-flash", contents, config)
+}
+
+func storeGroundingLinks(chunks []*genai.GroundingChunk) (string, error) {
+	links := make([]models.GroundingLink, 0, len(chunks))
+	for _, chunk := range chunks {
+		if chunk.Web != nil {
+			links = append(links, models.GroundingLink{
+				Title: chunk.Web.Title,
+				URI:   chunk.Web.URI,
+			})
+		}
 	}
-	log.Printf("[ReplyToBot] Replied msg sender: %s, text: %q", replyMsg.Sender, replyMsg.Text)
 
-	// Check if the sender of the replied message is the bot
-	repliedMsgSenderID := getRepliedMessageSenderID(m.ChatID(), replyToMsgID)
-	log.Printf("[ReplyToBot] Replied msg senderID: %d, botUserID: %d", repliedMsgSenderID, botUserID)
-	if repliedMsgSenderID != botUserID {
-		log.Printf("[ReplyToBot] Not a reply to bot, skipping")
-		return nil
+	if len(links) == 0 {
+		return "", fmt.Errorf("no web links found")
 	}
-	log.Printf("[ReplyToBot] Confirmed reply to bot, proceeding with AI")
 
-	// Get the user who triggered this
-	userID := m.SenderID()
+	doc := models.VertexLinks{
+		Links: links,
+		Sent:  false,
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	var user models.User
-	err := db.Collection("users").FindOne(ctx, bson.M{"_id": userID}).Decode(&user)
-	if err == mongo.ErrNoDocuments || user.CerebrasAPIKey == "" {
-		log.Printf("[ReplyToBot] User %d has no API key", userID)
-		return nil
-	}
+	result, err := db.Collection("vertexlinks").InsertOne(ctx, doc)
 	if err != nil {
-		log.Printf("[ReplyToBot] DB error for user %d: %v", userID, err)
+		return "", err
+	}
+
+	return result.InsertedID.(primitive.ObjectID).Hex(), nil
+}
+
+func handleGetVertexLinks(cb *telegram.CallbackQuery) error {
+	data := string(cb.Data)
+	parts := strings.Split(data, "|")
+	if len(parts) != 2 {
+		cb.Answer("Invalid request", &telegram.CallbackOptions{Alert: true})
 		return nil
 	}
-	log.Printf("[ReplyToBot] User %d has valid API key", userID)
 
-	chatID := m.ChatID()
-
-	// Build context from chat history
-	var contextBuilder strings.Builder
-	contextBuilder.WriteString("Chat context:\n```\n")
-
-	chatHistory := fetchChatHistory(chatID, m.ID, 10)
-	for _, msg := range chatHistory {
-		contextBuilder.WriteString(msg.Sender)
-		contextBuilder.WriteString("\n")
-		contextBuilder.WriteString(msg.Text)
-		contextBuilder.WriteString("\n")
-	}
-	contextBuilder.WriteString("```\n")
-
-	// Add the replied message context
-	contextBuilder.WriteString(fmt.Sprintf("Replied to:\n```\n%s\n%s\n```\n", replyMsg.Sender, replyMsg.Text))
-
-	// Add user's message
-	senderName := getSenderNameFromMessage(m)
-	contextBuilder.WriteString(fmt.Sprintf("user `%s` Said:\n```\n%s\n```\n", senderName, text))
-
-	finalPrompt := contextBuilder.String()
-	// log.Printf("[ReplyToBot] Final prompt:\n%s", finalPrompt)
-	// Send placeholder message
-	log.Printf("[ReplyToBot] Sending placeholder...")
-	placeholder, err := m.Reply("...")
+	linkID := parts[1]
+	objID, err := primitive.ObjectIDFromHex(linkID)
 	if err != nil {
-		log.Printf("[ReplyToBot] Failed to send placeholder: %v", err)
+		cb.Answer("Invalid link ID", &telegram.CallbackOptions{Alert: true})
 		return nil
 	}
-	log.Printf("[ReplyToBot] Placeholder sent, calling Cerebras API")
 
-	// Call Cerebras API
-	log.Printf("[ReplyToBot] Calling Cerebras API with model: %s, prompt length: %d", "llama-3.3-70b", len(finalPrompt))
-	reqBody := CerebrasRequest{
-		Model:       "llama-3.3-70b",
-		Stream:      false,
-		MaxTokens:   1024,
-		Temperature: 1,
-		TopP:        0.95,
-		Messages: []Message{
-			{Role: "system", Content: SYSTEM_PROMPT},
-			{Role: "user", Content: finalPrompt},
-		},
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	jsonBody, err := json.Marshal(reqBody)
+	var doc models.VertexLinks
+	err = db.Collection("vertexlinks").FindOne(ctx, bson.M{"_id": objID}).Decode(&doc)
 	if err != nil {
-		log.Printf("[ReplyToBot] JSON marshal error: %v", err)
+		cb.Answer("Links not found", &telegram.CallbackOptions{Alert: true})
 		return nil
 	}
 
-	req, err := http.NewRequest("POST", cerebrasAPIURL, bytes.NewBuffer(jsonBody))
-	if err != nil {
-		log.Printf("[ReplyToBot] Request creation error: %v", err)
+	if doc.Sent {
+		cb.Answer("Links already sent", &telegram.CallbackOptions{Alert: true})
 		return nil
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+user.CerebrasAPIKey)
-
-	httpClient := &http.Client{Timeout: 30 * time.Second}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		log.Printf("[ReplyToBot] HTTP request error: %v", err)
-		return nil
-	}
-	defer resp.Body.Close()
-	log.Printf("[ReplyToBot] API response status: %d", resp.StatusCode)
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("[ReplyToBot] Response read error: %v", err)
-		return nil
+	// Build links message
+	var sb strings.Builder
+	sb.WriteString("🔗 Grounded Links:\n\n")
+	for i, link := range doc.Links {
+		sb.WriteString(fmt.Sprintf("%d. %s\n%s\n\n", i+1, link.Title, link.URI))
 	}
 
-	log.Printf("[ReplyToBot] API response body length: %d bytes", len(body))
+	// Send reply to the chat where button was clicked
+	// cb.ChatID is int64
+	botClient.SendMessage(cb.ChatID, sb.String(), nil)
 
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("[ReplyToBot] API error (status %d): %s", resp.StatusCode, string(body))
-		return nil
-	}
+	// Mark as sent
+	db.Collection("vertexlinks").UpdateOne(ctx, bson.M{"_id": objID}, bson.M{"$set": bson.M{"sent": true}})
 
-	var cerebrasResp CerebrasResponse
-	if err := json.Unmarshal(body, &cerebrasResp); err != nil {
-		log.Printf("[ReplyToBot] JSON unmarshal error: %v", err)
-		return nil
-	}
-
-	if len(cerebrasResp.Choices) == 0 {
-		log.Printf("[ReplyToBot] Empty choices in response")
-		placeholder.Edit("No response from AI.")
-		return nil
-	}
-
-	log.Printf("[ReplyToBot] Got response, length: %d chars", len(cerebrasResp.Choices[0].Message.Content))
-
-	placeholder.Edit(cerebrasResp.Choices[0].Message.Content)
+	cb.Answer("Links sent!", nil)
 	return nil
 }
+
+// Helper functions
 
 type ChatMessage struct {
 	Sender string
 	Text   string
 }
 
-func fetchChatHistory(chatID int64, excludeMsgID int32, limit int) []ChatMessage {
-	return fetchChatHistoryExcluding(chatID, excludeMsgID, 0, limit)
+func getSenderName(m *telegram.NewMessage) string {
+	sender := m.Sender
+	if sender == nil {
+		return fmt.Sprintf("User_%d", m.SenderID())
+	}
+
+	if sender.Username != "" {
+		return "@" + sender.Username
+	}
+
+	name := sender.FirstName
+	if name == "" && sender.LastName != "" {
+		name = sender.LastName
+	}
+	if name != "" {
+		if len(name) > 8 {
+			return name[:8]
+		}
+		return name
+	}
+
+	return fmt.Sprintf("%d", sender.ID)
+}
+
+func getSenderFromMessage(msg *telegram.NewMessage) string {
+	if msg.Sender != nil {
+		if msg.Sender.Username != "" {
+			return "@" + msg.Sender.Username
+		}
+		name := msg.Sender.FirstName
+		if name == "" && msg.Sender.LastName != "" {
+			name = msg.Sender.LastName
+		}
+		if name != "" {
+			if len(name) > 8 {
+				return name[:8]
+			}
+			return name
+		}
+		return fmt.Sprintf("%d", msg.Sender.ID)
+	}
+	return "Unknown"
 }
 
 func fetchChatHistoryExcluding(chatID int64, currentMsgID int32, excludeReplyID int32, limit int) []ChatMessage {
 	if botClient == nil {
-		log.Printf("[fetchChatHistory] botClient is nil")
 		return nil
 	}
 
-	// Build list of message IDs to fetch (currentMsgID-1 down to currentMsgID-15)
-	// Fetch extra to account for empty/command messages
 	fetchCount := limit + 5
 	ids := make([]int32, 0, fetchCount)
 	for i := 1; i <= fetchCount; i++ {
@@ -453,47 +451,28 @@ func fetchChatHistoryExcluding(chatID int64, currentMsgID int32, excludeReplyID 
 	}
 
 	if len(ids) == 0 {
-		log.Printf("[fetchChatHistory] No IDs to fetch")
 		return nil
 	}
 
-	log.Printf("[fetchChatHistory] Fetching %d messages by ID from chat %d", len(ids), chatID)
-
-	messages, err := botClient.GetMessages(chatID, &telegram.SearchOption{
-		IDs: ids,
-	})
+	messages, err := botClient.GetMessages(chatID, &telegram.SearchOption{IDs: ids})
 	if err != nil {
-		log.Printf("[fetchChatHistory] GetMessages error: %v", err)
+		log.Printf("[AiChat] GetMessages error: %v", err)
 		return nil
 	}
-
-	log.Printf("[fetchChatHistory] Got %d messages", len(messages))
 
 	var result []ChatMessage
 	for _, msg := range messages {
-		// Skip current message (shouldn't happen but safety check)
-		if msg.ID == currentMsgID {
-			continue
-		}
-		// Skip replied message (it will be added separately)
-		if excludeReplyID != 0 && msg.ID == excludeReplyID {
+		if msg.ID == currentMsgID || (excludeReplyID != 0 && msg.ID == excludeReplyID) {
 			continue
 		}
 
 		text := msg.Text()
-		if text == "" {
+		if text == "" || strings.HasPrefix(text, "/") {
 			continue
 		}
-
-		// Skip bot commands
-		if strings.HasPrefix(text, "/") {
-			continue
-		}
-
-		sender := getSenderFromNewMessage(&msg)
 
 		result = append(result, ChatMessage{
-			Sender: sender,
+			Sender: getSenderFromMessage(&msg),
 			Text:   text,
 		})
 
@@ -502,66 +481,101 @@ func fetchChatHistoryExcluding(chatID int64, currentMsgID int32, excludeReplyID 
 		}
 	}
 
-	// Messages from GetMessages come in order of IDs array (newest first)
-	// Reverse to get chronological order (oldest first)
+	// Reverse for chronological order
 	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
 		result[i], result[j] = result[j], result[i]
 	}
 
-	log.Printf("[fetchChatHistory] Returning %d messages", len(result))
 	return result
 }
 
-func getMessageByID(chatID int64, msgID int32) *ChatMessage {
+func getMessageWithMedia(chatID int64, msgID int32) (*ChatMessage, *genai.Part) {
 	if botClient == nil {
-		log.Printf("[getMessageByID] botClient is nil")
-		return nil
+		return nil, nil
 	}
 
-	log.Printf("[getMessageByID] Fetching msgID %d from chat %d", msgID, chatID)
+	msgs, err := botClient.GetMessages(chatID, &telegram.SearchOption{IDs: []int32{msgID}})
+	if err != nil || len(msgs) == 0 {
+		return nil, nil
+	}
 
-	// Try GetMessages first (direct fetch by ID)
-	msgs, err := botClient.GetMessages(chatID, &telegram.SearchOption{
-		IDs: []int32{msgID},
-	})
-	if err != nil {
-		log.Printf("[getMessageByID] GetMessages error: %v", err)
-	} else if len(msgs) > 0 {
-		log.Printf("[getMessageByID] GetMessages returned %d messages", len(msgs))
-		for _, msg := range msgs {
-			if msg.ID == msgID {
-				return &ChatMessage{
-					Sender: getSenderFromNewMessage(&msg),
-					Text:   msg.Text(),
-				}
+	msg := msgs[0]
+	chatMsg := &ChatMessage{
+		Sender: getSenderFromMessage(&msg),
+		Text:   msg.Text(),
+	}
+
+	// Check for media
+	var mediaPart *genai.Part
+	if msg.Media() != nil {
+		mediaData, mimeType := downloadMedia(&msg)
+		if mediaData != nil {
+			mediaPart = &genai.Part{
+				InlineData: &genai.Blob{
+					Data:     mediaData,
+					MIMEType: mimeType,
+				},
 			}
 		}
 	}
 
-	// Fallback to GetHistory
-	log.Printf("[getMessageByID] Trying GetHistory fallback")
-	messages, err := botClient.GetHistory(chatID, &telegram.HistoryOption{
-		Limit: 10,
-		MaxID: msgID + 1,
-	})
-	if err != nil {
-		log.Printf("[getMessageByID] GetHistory error: %v", err)
-		return nil
-	}
-	log.Printf("[getMessageByID] GetHistory returned %d messages", len(messages))
+	return chatMsg, mediaPart
+}
 
-	for _, msg := range messages {
-		log.Printf("[getMessageByID] Checking msg.ID=%d vs target=%d", msg.ID, msgID)
-		if msg.ID == msgID {
-			return &ChatMessage{
-				Sender: getSenderFromNewMessage(&msg),
-				Text:   msg.Text(),
-			}
+func downloadMedia(msg *telegram.NewMessage) ([]byte, string) {
+	if msg.Message == nil || msg.Message.Media == nil {
+		return nil, ""
+	}
+
+	// Get file size first
+	var fileSize int64
+	var mimeType string
+
+	switch media := msg.Message.Media.(type) {
+	case *telegram.MessageMediaPhoto:
+		// Photos are usually small, proceed
+		mimeType = "image/jpeg"
+	case *telegram.MessageMediaDocument:
+		if media.Document != nil {
+			// Skip explicit document size check to avoid type assertion issues with interface
+			// Just rely on post-download size check
+			mimeType = "application/octet-stream"
 		}
+	default:
+		return nil, ""
 	}
 
-	log.Printf("[getMessageByID] Message not found")
-	return nil
+	// Check size limit (skipped for documents here, checked later)
+	if fileSize > maxMediaSize {
+		log.Printf("[AiChat] Media too large: %d bytes", fileSize)
+		return nil, ""
+	}
+
+	// Download media
+	path, err := botClient.DownloadMedia(msg.Message.Media, &telegram.DownloadOptions{})
+	if err != nil {
+		log.Printf("[AiChat] Failed to download media: %v", err)
+		return nil, ""
+	}
+	defer os.Remove(path)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("[AiChat] Failed to read media file: %v", err)
+		return nil, ""
+	}
+
+	// Check size after download
+	if len(data) > maxMediaSize {
+		log.Printf("[AiChat] Downloaded media too large: %d bytes", len(data))
+		return nil, ""
+	}
+
+	if mimeType == "" || mimeType == "application/octet-stream" {
+		mimeType = http.DetectContentType(data)
+	}
+
+	return data, mimeType
 }
 
 func getRepliedMessageSenderID(chatID int64, msgID int32) int64 {
@@ -569,82 +583,16 @@ func getRepliedMessageSenderID(chatID int64, msgID int32) int64 {
 		return 0
 	}
 
-	// Use GetMessages with IDs for direct fetch
-	msgs, err := botClient.GetMessages(chatID, &telegram.SearchOption{
-		IDs: []int32{msgID},
-	})
+	msgs, err := botClient.GetMessages(chatID, &telegram.SearchOption{IDs: []int32{msgID}})
 	if err != nil {
-		log.Printf("[getRepliedMessageSenderID] GetMessages error: %v", err)
 		return 0
 	}
 
 	for _, msg := range msgs {
 		if msg.ID == msgID {
-			senderID := msg.SenderID()
-			log.Printf("[getRepliedMessageSenderID] Found senderID: %d for msgID: %d", senderID, msgID)
-			return senderID
+			return msg.SenderID()
 		}
 	}
 
 	return 0
-}
-
-func getSenderFromNewMessage(m *telegram.NewMessage) string {
-	if m.Sender != nil {
-		if m.Sender.Username != "" {
-			return "@" + m.Sender.Username
-		}
-		name := m.Sender.FirstName
-		if m.Sender.LastName != "" {
-			name += " " + m.Sender.LastName
-		}
-		if name != "" {
-			return name
-		}
-		return fmt.Sprintf("User_%d", m.Sender.ID)
-	}
-
-	if m.Message != nil && m.Message.FromID != nil {
-		switch peer := m.Message.FromID.(type) {
-		case *telegram.PeerUser:
-			user, err := botClient.GetUser(peer.UserID)
-			if err == nil {
-				if user.Username != "" {
-					return "@" + user.Username
-				}
-				name := user.FirstName
-				if user.LastName != "" {
-					name += " " + user.LastName
-				}
-				return name
-			}
-			return fmt.Sprintf("User_%d", peer.UserID)
-		case *telegram.PeerChannel:
-			return fmt.Sprintf("Channel_%d", peer.ChannelID)
-		case *telegram.PeerChat:
-			return fmt.Sprintf("Chat_%d", peer.ChatID)
-		}
-	}
-
-	return "Unknown"
-}
-
-func getSenderNameFromMessage(m *telegram.NewMessage) string {
-	sender := m.Sender
-	if sender == nil {
-		return "Unknown"
-	}
-
-	if sender.Username != "" {
-		return "@" + sender.Username
-	}
-
-	name := sender.FirstName
-	if sender.LastName != "" {
-		name += " " + sender.LastName
-	}
-	if name == "" {
-		return fmt.Sprintf("User_%d", sender.ID)
-	}
-	return name
 }

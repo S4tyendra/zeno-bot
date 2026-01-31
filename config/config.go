@@ -9,10 +9,11 @@ import (
 )
 
 var (
-	BotToken   string
-	MongoDBURL string
-	AppID      int
-	AppHash    string
+	BotToken       string
+	MongoDBURL     string
+	AppID          int
+	AppHash        string
+	AIStudioAPIKey string
 )
 
 func Load() {
@@ -41,5 +42,10 @@ func Load() {
 	AppHash = os.Getenv("APP_HASH")
 	if AppHash == "" {
 		log.Fatal("APP_HASH is required")
+	}
+
+	AIStudioAPIKey = os.Getenv("AISTUDIO_API_KEY")
+	if AIStudioAPIKey == "" {
+		log.Fatal("AISTUDIO_API_KEY is required")
 	}
 }
