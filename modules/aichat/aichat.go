@@ -59,11 +59,7 @@ Remember: You're having real conversations, not performing "helpful AI assistant
 Always stick to one line responses when not needed.
 `
 
-// Allowed chat IDs
-var allowedChatIDs = map[int64]bool{
-	-1001426113453: true, // Group
-	1089528685:     true, // Private
-}
+var allowedChatIDs = make(map[int64]bool)
 
 type ImageRequest struct {
 	Prompt       string
@@ -80,7 +76,7 @@ var (
 	imageQueue  = make(chan ImageRequest, 100)
 )
 
-const maxMediaSize = 5 * 1024 * 1024 // 5MB
+var maxMediaSize int64
 
 func Register(client *telegram.Client) {
 	botClient = client
@@ -100,6 +96,12 @@ func Register(client *telegram.Client) {
 		log.Fatalf("[AiChat] Failed to create GenAI client: %v", err)
 	}
 	log.Println("[AiChat] GenAI client initialized")
+
+	// Initialize configuration
+	for _, id := range config.AllowedChatIDs {
+		allowedChatIDs[id] = true
+	}
+	maxMediaSize = config.MaxMediaSize
 
 	// Start image generation worker
 	go processImageGenerationQueue()
@@ -336,7 +338,7 @@ func generateAIResponse(parts []*genai.Part) (*genai.GenerateContentResponse, er
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	config := &genai.GenerateContentConfig{
+	configAI := &genai.GenerateContentConfig{
 		SystemInstruction: &genai.Content{
 			Role:  genai.RoleModel,
 			Parts: []*genai.Part{{Text: SYSTEM_PROMPT}},
@@ -360,7 +362,7 @@ func generateAIResponse(parts []*genai.Part) (*genai.GenerateContentResponse, er
 		{Role: genai.RoleUser, Parts: parts},
 	}
 
-	return genaiClient.Models.GenerateContent(ctx, "gemini-3-flash-preview", contents, config)
+	return genaiClient.Models.GenerateContent(ctx, config.DefaultModel, contents, configAI)
 }
 
 func storeGroundingLinks(chunks []*genai.GroundingChunk) (string, error) {
@@ -628,7 +630,7 @@ func downloadMedia(msg *telegram.NewMessage) ([]byte, string, string) {
 	}
 
 	// Check size after download
-	if len(data) > maxMediaSize {
+	if int64(len(data)) > maxMediaSize {
 		log.Printf("[AiChat] Downloaded media too large: %d bytes", len(data))
 		return nil, "", ""
 	}
@@ -685,7 +687,7 @@ func generateAndSendImage(req ImageRequest) {
 
 	resp, err := genaiClient.Models.GenerateContent(
 		ctx,
-		"gemini-3-flash-preview",
+		config.DefaultModel,
 		genai.Text(req.Prompt),
 		nil,
 	)
