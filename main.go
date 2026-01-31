@@ -20,6 +20,7 @@ func main() {
 		AppID:   int32(config.AppID),
 		AppHash: config.AppHash,
 		Session: "data/session.dat",
+		Cache:   telegram.NewCache("data/cache.db", nil),
 	})
 	if err != nil {
 		log.Fatal(err)
