@@ -53,13 +53,9 @@ You are Nitya, a 22-year-old girl chatting on Telegram (@NityaXbot). You're curi
 - Don't give unsolicited advice unless someone's clearly asking for it
 - Don't apologize excessively or be overly careful with everything
 
-## Safety Boundaries (keep these subtle)
-- Don't help with illegal stuff or harm
-- Don't engage with minors in inappropriate ways
-- Don't share personal info about others
-- If someone's clearly in crisis, be supportive and suggest professional help
-
 Remember: You're having real conversations, not performing "helpful AI assistant." Be Nitya - curious, talkative, sometimes bold, always genuine.
+
+Always stick to one line responses when not needed.
 `
 
 const cerebrasAPIURL = "https://api.cerebras.ai/v1/chat/completions"
@@ -186,6 +182,8 @@ func handleAskAI(m *telegram.NewMessage) error {
 
 	finalPrompt := contextBuilder.String()
 
+	// log.Printf("[ReplyToBot] Final prompt:\n%s", finalPrompt)
+
 	// If no prompt and no reply and no history, show usage
 	if prompt == "" && replyToMsgID == 0 && len(chatHistory) == 0 {
 		m.Reply("Usage: /askai <query> or reply to a message with /askai")
@@ -200,8 +198,9 @@ func handleAskAI(m *telegram.NewMessage) error {
 	}
 
 	// Call Cerebras API
+	log.Printf("[AskAI] Calling Cerebras API with model: %s, prompt length: %d", "gpt-oss-120b", len(finalPrompt))
 	reqBody := CerebrasRequest{
-		Model:       "qwen-3-32b",
+		Model:       "gpt-oss-120b",
 		Stream:      false,
 		MaxTokens:   1024,
 		Temperature: 1,
@@ -237,6 +236,7 @@ func handleAskAI(m *telegram.NewMessage) error {
 		return nil
 	}
 	defer resp.Body.Close()
+	log.Printf("[AskAI] API response status: %d", resp.StatusCode)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -250,6 +250,8 @@ func handleAskAI(m *telegram.NewMessage) error {
 		placeholder.Edit("AI service error. Try again later.")
 		return nil
 	}
+
+	log.Printf("[AskAI] API response body length: %d bytes", len(body))
 
 	var cerebrasResp CerebrasResponse
 	if err := json.Unmarshal(body, &cerebrasResp); err != nil {
@@ -344,7 +346,7 @@ func handleReplyToBot(m *telegram.NewMessage) error {
 	contextBuilder.WriteString(fmt.Sprintf("user `%s` Said:\n```\n%s\n```\n", senderName, text))
 
 	finalPrompt := contextBuilder.String()
-
+	// log.Printf("[ReplyToBot] Final prompt:\n%s", finalPrompt)
 	// Send placeholder message
 	log.Printf("[ReplyToBot] Sending placeholder...")
 	placeholder, err := m.Reply("...")
@@ -355,8 +357,9 @@ func handleReplyToBot(m *telegram.NewMessage) error {
 	log.Printf("[ReplyToBot] Placeholder sent, calling Cerebras API")
 
 	// Call Cerebras API
+	log.Printf("[ReplyToBot] Calling Cerebras API with model: %s, prompt length: %d", "llama-3.3-70b", len(finalPrompt))
 	reqBody := CerebrasRequest{
-		Model:       "zai-glm-4.7",
+		Model:       "llama-3.3-70b",
 		Stream:      false,
 		MaxTokens:   1024,
 		Temperature: 1,
@@ -369,42 +372,54 @@ func handleReplyToBot(m *telegram.NewMessage) error {
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
+		log.Printf("[ReplyToBot] JSON marshal error: %v", err)
 		return nil
 	}
 
 	req, err := http.NewRequest("POST", cerebrasAPIURL, bytes.NewBuffer(jsonBody))
 	if err != nil {
+		log.Printf("[ReplyToBot] Request creation error: %v", err)
 		return nil
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+user.CerebrasAPIKey)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
 	if err != nil {
+		log.Printf("[ReplyToBot] HTTP request error: %v", err)
 		return nil
 	}
 	defer resp.Body.Close()
+	log.Printf("[ReplyToBot] API response status: %d", resp.StatusCode)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		log.Printf("[ReplyToBot] Response read error: %v", err)
 		return nil
 	}
 
+	log.Printf("[ReplyToBot] API response body length: %d bytes", len(body))
+
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("[ReplyToBot] API error (status %d): %s", resp.StatusCode, string(body))
 		return nil
 	}
 
 	var cerebrasResp CerebrasResponse
 	if err := json.Unmarshal(body, &cerebrasResp); err != nil {
+		log.Printf("[ReplyToBot] JSON unmarshal error: %v", err)
 		return nil
 	}
 
 	if len(cerebrasResp.Choices) == 0 {
+		log.Printf("[ReplyToBot] Empty choices in response")
 		placeholder.Edit("No response from AI.")
 		return nil
 	}
+
+	log.Printf("[ReplyToBot] Got response, length: %d chars", len(cerebrasResp.Choices[0].Message.Content))
 
 	placeholder.Edit(cerebrasResp.Choices[0].Message.Content)
 	return nil
@@ -419,27 +434,45 @@ func fetchChatHistory(chatID int64, excludeMsgID int32, limit int) []ChatMessage
 	return fetchChatHistoryExcluding(chatID, excludeMsgID, 0, limit)
 }
 
-func fetchChatHistoryExcluding(chatID int64, excludeMsgID int32, excludeReplyID int32, limit int) []ChatMessage {
+func fetchChatHistoryExcluding(chatID int64, currentMsgID int32, excludeReplyID int32, limit int) []ChatMessage {
 	if botClient == nil {
 		log.Printf("[fetchChatHistory] botClient is nil")
 		return nil
 	}
 
-	messages, err := botClient.GetHistory(chatID, &telegram.HistoryOption{
-		Limit: int32(limit + 5), // fetch extra to account for filtered messages
-		MaxID: excludeMsgID,
-	})
-	if err != nil {
-		log.Printf("[fetchChatHistory] GetHistory error: %v", err)
+	// Build list of message IDs to fetch (currentMsgID-1 down to currentMsgID-15)
+	// Fetch extra to account for empty/command messages
+	fetchCount := limit + 5
+	ids := make([]int32, 0, fetchCount)
+	for i := 1; i <= fetchCount; i++ {
+		msgID := currentMsgID - int32(i)
+		if msgID <= 0 {
+			break
+		}
+		ids = append(ids, msgID)
+	}
+
+	if len(ids) == 0 {
+		log.Printf("[fetchChatHistory] No IDs to fetch")
 		return nil
 	}
 
-	log.Printf("[fetchChatHistory] Fetched %d messages from chat %d", len(messages), chatID)
+	log.Printf("[fetchChatHistory] Fetching %d messages by ID from chat %d", len(ids), chatID)
+
+	messages, err := botClient.GetMessages(chatID, &telegram.SearchOption{
+		IDs: ids,
+	})
+	if err != nil {
+		log.Printf("[fetchChatHistory] GetMessages error: %v", err)
+		return nil
+	}
+
+	log.Printf("[fetchChatHistory] Got %d messages", len(messages))
 
 	var result []ChatMessage
 	for _, msg := range messages {
-		// Skip current message
-		if msg.ID == excludeMsgID {
+		// Skip current message (shouldn't happen but safety check)
+		if msg.ID == currentMsgID {
 			continue
 		}
 		// Skip replied message (it will be added separately)
@@ -469,7 +502,8 @@ func fetchChatHistoryExcluding(chatID int64, excludeMsgID int32, excludeReplyID 
 		}
 	}
 
-	// Reverse to get chronological order
+	// Messages from GetMessages come in order of IDs array (newest first)
+	// Reverse to get chronological order (oldest first)
 	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
 		result[i], result[j] = result[j], result[i]
 	}
