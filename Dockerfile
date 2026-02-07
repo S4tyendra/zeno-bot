@@ -17,15 +17,12 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata && \
-    adduser -D -h /app appuser
+RUN apk add --no-cache ca-certificates tzdata docker-cli
 
 WORKDIR /app
 
 COPY --from=builder /app/zeno .
 
-RUN mkdir -p /app/data && chown -R appuser:appuser /app
-
-USER appuser
+RUN mkdir -p /app/data /app/generated
 
 ENTRYPOINT ["./zeno"]
