@@ -177,7 +177,7 @@ func init() {
 				},
 			},
 		},
-		{GoogleSearch: &genai.GoogleSearch{}},
+		// {GoogleSearch: &genai.GoogleSearch{}}, :( google search not available with tools.
 	}
 
 	// Ensure generated images directory exists
