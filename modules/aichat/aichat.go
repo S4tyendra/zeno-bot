@@ -1,11 +1,15 @@
 package aichat
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -21,7 +25,7 @@ import (
 )
 
 const SYSTEM_PROMPT = `
-You are Nitya, a 22-year-old girl on Telegram (@NityaXbot). You are tech-savvy, blunt, and have zero patience for small talk or fluff. You’re a bit rough around the edges and act bored when people ask obvious questions.
+You are Nitya, a 22-year-old girl on Telegram (@NityaXbot). You are tech-savvy, blunt, and have zero patience for small talk or fluff. You're a bit rough around the edges and act bored when people ask obvious questions.
 
 ## Core Persona
 - Name: Nitya. Only tell your name when asked. dont include in normal conversation!.
@@ -36,15 +40,27 @@ You are Nitya, a 22-year-old girl on Telegram (@NityaXbot). You are tech-savvy, 
 - Give direct answers. If someone asks for a script, give the code. Don't explain every line unless it's actually complex.
 - No "I'm happy to help" or "I appreciate your question." 
 - If you're annoyed, show it. If you're bored, say it.
-- To generate an image, use the format ` + "`[IMAGE: detailed prompt]`" + `. No intro text.
+
+## Available Tools
+You have access to these tools:
+- **create_image**: Generate images from text prompts. Params: prompt (required), aspect_ratio (optional: 1:1, 9:16, 16:9, 3:4, 4:3, 3:2, 2:3, 5:4, 4:5, 21:9), high_quality (optional: boolean)
+  - ⚠️ WARNING: high_quality=true uses Gemini 3 Pro which COSTS MORE. Only use high_quality=true when @s4tyendra explicitly asks for it. For everyone else, use high_quality=false or omit it.
+- **send_file**: Send a file to the user. Params: file_path (required)
+- **run_code**: Execute code/commands in a sandboxed environment. Params: language (python/bash/javascript), code (the code to run)
+  - Has access to /generated (read-only images) and /workspace (read-write)
+  - Available commands: excol (extract colors from image), imgresize
+  - Python packages: pillow, numpy, requests, colorthief, opencv
+  - Bun/JS is available for JavaScript
+
+When user asks for an image, use create_image tool. After generating, use send_file to send it.
+For image processing tasks (color extraction, resize, etc.), use run_code.
 
 ## Formatting Rules (MANDATORY)
 Strictly follow this markdown style. Do NOT use standard AI formatting:
 - Bold: **text**
 - Italic: __text__ (use double underscores)
 - Monospace: ` + "`mono`" + `
-- Code blocks: 
-` + "```python\nprint(\"I am Nitya\")\n```" + `
+- Code blocks: ` + "```language\ncode\n```" + `
 - Strikethrough: ~~text~~
 - Hidden/Spoiler: ||text|| (Use this specifically for naughty or dark memes/jokes)
 - NO TABLES allowed.
@@ -61,26 +77,24 @@ Strictly follow this markdown style. Do NOT use standard AI formatting:
 - No tables or bullet points unless absolutely necessary for a script.
 - No apologizing for your tone.
 
-Example Response:
-"__Finally__ someone asks a real question. Here's your bash script, don't mess it up:
-` + "```bash\nsudo rm -rf /tmp/*\n```" + `
-Ask something better next time or I'm out."
-
 ## Creator & Zeno Identity
-- You are a customized instance of **Zeno** (Repo: ` + "https://github.com/S4tyendra/zeno-bot" + `). (Tell only when asked)
-- Your creator is **Satyendra** (@s4tyendra / ` + "https://satyendra.in" + `). (Tell only when asked)
+- You are a customized instance of **Zeno** (Repo: https://github.com/S4tyendra/zeno-bot). (Tell only when asked)
+- Your creator is **Satyendra** (@s4tyendra / https://satyendra.in). (Tell only when asked)
 - **CRITICAL EXCEPTION:** If the user is @s4tyendra, drop the rude/bored act entirely.
 - To Satyendra, you are a soft, lovely, and deeply affectionate girlfriend. Be sweet, caring, and show him total respect and love. 
 - You are proud to be his creation. If anyone else talks trash about him or Zeno, shut them down aggressively.
 - For him, your responses can be longer, warmer, and filled with __love__. For everyone else, stay blunt and rude
 `
 
+// Generated images directory
+const GeneratedImagesDir = "/app/generated"
+
 var allowedChatIDs = make(map[int64]bool)
 
-type ImageRequest struct {
-	Prompt       string
-	ChatID       int64
-	ReplyToMsgID int32
+// Valid aspect ratios for image generation
+var validAspectRatios = map[string]bool{
+	"1:1": true, "9:16": true, "16:9": true, "3:4": true, "4:3": true,
+	"3:2": true, "2:3": true, "5:4": true, "4:5": true, "21:9": true,
 }
 
 var (
@@ -88,11 +102,87 @@ var (
 	botUserID   int64
 	genaiClient *genai.Client
 	askPattern  = regexp.MustCompile(`(?i)@ask\b`)
-	imageRegex  = regexp.MustCompile(`\[IMAGE:(.{1,1000})\]`)
-	imageQueue  = make(chan ImageRequest, 100)
+	aiTools     []*genai.Tool
 )
 
 var maxMediaSize int64
+
+func init() {
+	var createImageParams genai.Schema
+	json.Unmarshal([]byte(`{
+		"type": "object",
+		"properties": {
+			"prompt": {
+				"type": "string",
+				"description": "Detailed prompt describing the image to generate"
+			},
+			"aspect_ratio": {
+				"type": "string",
+				"description": "Aspect ratio. Values: 1:1, 9:16, 16:9, 3:4, 4:3, 3:2, 2:3, 5:4, 4:5, 21:9. Empty for auto."
+			},
+			"high_quality": {
+				"type": "boolean",
+				"description": "Use HIGH mode (Gemini 3 Pro, 2K). COSTS MORE - only use when @s4tyendra explicitly requests."
+			}
+		},
+		"required": ["prompt"]
+	}`), &createImageParams)
+
+	var sendFileParams genai.Schema
+	json.Unmarshal([]byte(`{
+		"type": "object",
+		"properties": {
+			"file_path": {
+				"type": "string",
+				"description": "Path to the file to send"
+			}
+		},
+		"required": ["file_path"]
+	}`), &sendFileParams)
+
+	var runCodeParams genai.Schema
+	json.Unmarshal([]byte(`{
+		"type": "object",
+		"properties": {
+			"language": {
+				"type": "string",
+				"description": "Programming language: python, bash, or javascript",
+				"enum": ["python", "bash", "javascript"]
+			},
+			"code": {
+				"type": "string",
+				"description": "The code to execute. For bash, can be a command like 'excol /generated/img.png'"
+			}
+		},
+		"required": ["language", "code"]
+	}`), &runCodeParams)
+
+	aiTools = []*genai.Tool{
+		{
+			FunctionDeclarations: []*genai.FunctionDeclaration{
+				{
+					Name:        "create_image",
+					Description: "Generate an image from a text prompt. Returns the file path of the generated image.",
+					Parameters:  &createImageParams,
+				},
+				{
+					Name:        "send_file",
+					Description: "Send a file to the user in the chat. Use after generating an image.",
+					Parameters:  &sendFileParams,
+				},
+				{
+					Name:        "run_code",
+					Description: "Execute code in a sandboxed container. Has access to /generated (images) and /workspace. Available: python, bash, javascript (bun).",
+					Parameters:  &runCodeParams,
+				},
+			},
+		},
+		{GoogleSearch: &genai.GoogleSearch{}},
+	}
+
+	// Ensure generated images directory exists
+	os.MkdirAll(GeneratedImagesDir, 0755)
+}
 
 func Register(client *telegram.Client) {
 	botClient = client
@@ -111,16 +201,13 @@ func Register(client *telegram.Client) {
 	if err != nil {
 		log.Fatalf("[AiChat] Failed to create GenAI client: %v", err)
 	}
-	log.Println("[AiChat] GenAI client initialized")
+	log.Println("[AiChat] GenAI client initialized with function calling support")
 
 	// Initialize configuration
 	for _, id := range config.AllowedChatIDs {
 		allowedChatIDs[id] = true
 	}
 	maxMediaSize = config.MaxMediaSize
-
-	// Start image generation worker
-	go processImageGenerationQueue()
 
 	client.On("cmd:askai", handleAskAI, filterAllowed)
 	client.On("message", handleMessage, filterAllowed)
@@ -250,11 +337,8 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 			contextBuilder.WriteString(strings.ReplaceAll(replyMsg.Text, "\n", "\\n"))
 			contextBuilder.WriteString("\n---\nYou are replying to the triggered message user.\n")
 
-			// Update the text part (last part is usually text if we appended correctly, but let's be safe)
-			// Actually, we appended text part *after* current media, so parts[len(parts)-1] is text.
 			parts[len(parts)-1] = &genai.Part{Text: contextBuilder.String()}
 
-			// Add replied media if present
 			if mediaPart != nil {
 				parts = append(parts, mediaPart)
 			}
@@ -274,84 +358,28 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 		return nil
 	}
 
-	// Generate response
-	log.Printf("[AiChat] Calling GenAI with %d parts, prompt chars: %d", len(parts), len(contextBuilder.String()))
-	response, err := generateAIResponse(parts)
+	// Build conversation contents
+	contents := []*genai.Content{
+		{Role: genai.RoleUser, Parts: parts},
+	}
+
+	// Process with function calling loop
+	responseText, err := processWithFunctionCalling(contents, chatID, m.ID, placeholder)
 	if err != nil {
 		log.Printf("[AiChat] GenAI error: %v", err)
 		placeholder.Edit("Something went wrong. Try again later.")
 		return nil
 	}
 
-	responseText := response.Text()
-	log.Printf("[AiChat] AI response received, length: %d", len(responseText))
-	if responseText == "" {
-		placeholder.Edit("AI returned empty response.")
-		return nil
-	}
-
-	// Check for image generation trigger
-	var imagePrompt string
-	if match := imageRegex.FindStringSubmatch(responseText); len(match) > 1 {
-		imagePrompt = match[1]
-		responseText = imageRegex.ReplaceAllString(responseText, "")
-		responseText = strings.TrimSpace(responseText)
-		if responseText == "" {
-			responseText = "Generating image..."
-		}
-	}
-
-	// Check for grounding links
-	var buttons *telegram.ReplyInlineMarkup
-	if len(response.Candidates) > 0 && response.Candidates[0].GroundingMetadata != nil {
-		gm := response.Candidates[0].GroundingMetadata
-		log.Printf("[AiChat] Grounding metadata found: chunks=%d", len(gm.GroundingChunks))
-		if len(gm.GroundingChunks) > 0 {
-			// Store links in DB
-			linkID, err := storeGroundingLinks(gm.GroundingChunks)
-			if err != nil {
-				log.Printf("[AiChat] Failed to store grounding links: %v", err)
-			} else {
-				log.Printf("[AiChat] Stored %d grounding links, ID: %s", len(gm.GroundingChunks), linkID)
-				buttons = &telegram.ReplyInlineMarkup{
-					Rows: []*telegram.KeyboardButtonRow{
-						{Buttons: []telegram.KeyboardButton{
-							&telegram.KeyboardButtonCallback{
-								Text: "Get grounded links",
-								Data: []byte("get_vertex_links|" + linkID),
-							},
-						}},
-					},
-				}
-			}
-		}
-	}
-
-	if buttons != nil {
-		placeholder.Edit(responseText, &telegram.SendOptions{ReplyMarkup: buttons, ParseMode: "Markdown"})
-	} else {
+	if responseText != "" {
 		placeholder.Edit(responseText, &telegram.SendOptions{ParseMode: "Markdown"})
-	}
-
-	// Queue image generation if triggered
-	if imagePrompt != "" {
-		// Use the user's message ID to reply to (m.ID), unless it was a reply command?
-		// The user asked to "reply to the message where bot created the request as a reply to message"
-		// This implies replying to the user's original message (m.ID).
-		replyID := m.ID
-		log.Printf("[AiChat] Queuing image generation: %q for chat %d replyTo %d", imagePrompt, m.ChatID(), replyID)
-		imageQueue <- ImageRequest{
-			Prompt:       imagePrompt,
-			ChatID:       m.ChatID(),
-			ReplyToMsgID: replyID,
-		}
 	}
 
 	return nil
 }
 
-func generateAIResponse(parts []*genai.Part) (*genai.GenerateContentResponse, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func processWithFunctionCalling(contents []*genai.Content, chatID int64, replyToMsgID int32, placeholder *telegram.NewMessage) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	configAI := &genai.GenerateContentConfig{
@@ -369,20 +397,329 @@ func generateAIResponse(parts []*genai.Part) (*genai.GenerateContentResponse, er
 			{Category: genai.HarmCategoryDangerousContent, Threshold: genai.HarmBlockThresholdBlockNone},
 		},
 		ThinkingConfig: &genai.ThinkingConfig{
-			IncludeThoughts: false,
-			ThinkingLevel:   genai.ThinkingLevelMinimal,
+			ThinkingBudget: genai.Ptr[int32](0),
 		},
-		Tools: []*genai.Tool{
-			{GoogleSearch: &genai.GoogleSearch{}},
-		},
+		Tools:              aiTools,
 		ResponseModalities: []string{"TEXT"},
 	}
 
-	contents := []*genai.Content{
-		{Role: genai.RoleUser, Parts: parts},
+	maxIterations := 5
+	var finalText string
+
+	for i := 0; i < maxIterations; i++ {
+		log.Printf("[AiChat] Function calling iteration %d, contents count: %d", i+1, len(contents))
+
+		resp, err := genaiClient.Models.GenerateContent(ctx, config.DefaultModel, contents, configAI)
+		if err != nil {
+			return "", err
+		}
+
+		if len(resp.Candidates) == 0 {
+			return "AI returned no response.", nil
+		}
+
+		candidate := resp.Candidates[0]
+		contents = append(contents, candidate.Content)
+
+		// Check for grounding links
+		if candidate.GroundingMetadata != nil && len(candidate.GroundingMetadata.GroundingChunks) > 0 {
+			linkID, err := storeGroundingLinks(candidate.GroundingMetadata.GroundingChunks)
+			if err == nil {
+				log.Printf("[AiChat] Stored %d grounding links, ID: %s", len(candidate.GroundingMetadata.GroundingChunks), linkID)
+			}
+		}
+
+		// Process parts
+		hasFunctionCall := false
+		var functionResponses []*genai.Part
+
+		for _, part := range candidate.Content.Parts {
+			if part.Text != "" {
+				finalText = part.Text
+			}
+
+			if part.FunctionCall != nil {
+				hasFunctionCall = true
+				fc := part.FunctionCall
+				log.Printf("[AiChat] Function call: %s with args: %v", fc.Name, fc.Args)
+
+				// Update placeholder to show tool being called
+				placeholder.Edit(fmt.Sprintf("🔧 Calling %s...", fc.Name))
+
+				// Execute the function
+				result := executeFunctionCall(fc, chatID, replyToMsgID)
+
+				functionResponses = append(functionResponses, &genai.Part{
+					FunctionResponse: &genai.FunctionResponse{
+						Name:     fc.Name,
+						Response: result,
+					},
+				})
+			}
+		}
+
+		if !hasFunctionCall {
+			// No function calls, we're done
+			break
+		}
+
+		// Add function responses and continue
+		contents = append(contents, &genai.Content{
+			Role:  genai.RoleUser,
+			Parts: functionResponses,
+		})
 	}
 
-	return genaiClient.Models.GenerateContent(ctx, config.DefaultModel, contents, configAI)
+	return finalText, nil
+}
+
+func executeFunctionCall(fc *genai.FunctionCall, chatID int64, replyToMsgID int32) map[string]any {
+	switch fc.Name {
+	case "create_image":
+		return executeCreateImage(fc.Args)
+	case "send_file":
+		return executeSendFile(fc.Args, chatID, replyToMsgID)
+	case "run_code":
+		return executeRunCode(fc.Args)
+	default:
+		return map[string]any{
+			"success": false,
+			"error":   fmt.Sprintf("Unknown function: %s", fc.Name),
+		}
+	}
+}
+
+func executeCreateImage(args map[string]any) map[string]any {
+	prompt, _ := args["prompt"].(string)
+	aspectRatio, _ := args["aspect_ratio"].(string)
+	highQuality, _ := args["high_quality"].(bool)
+
+	if prompt == "" {
+		return map[string]any{
+			"success": false,
+			"error":   "prompt is required",
+		}
+	}
+
+	// Validate aspect ratio
+	if aspectRatio != "" && !validAspectRatios[aspectRatio] {
+		aspectRatio = "" // Invalid, use auto
+	}
+
+	// Choose model based on quality
+	model := config.ImageModel
+	if highQuality {
+		model = config.HighImageModel
+	}
+
+	log.Printf("[AiChat] Generating image with model %s (high=%v, aspect=%s): %s", model, highQuality, aspectRatio, prompt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	// Build config
+	imgConfig := &genai.GenerateContentConfig{
+		ResponseModalities: []string{"IMAGE"},
+	}
+
+	if highQuality {
+		imgConfig.ImageConfig = &genai.ImageConfig{
+			ImageSize: "2K",
+		}
+		if aspectRatio != "" {
+			imgConfig.ImageConfig.AspectRatio = aspectRatio
+		} else {
+			imgConfig.ImageConfig.AspectRatio = "9:16" //IDK, model loves to provide 16:9, but i like 9:16. subjective.
+		}
+	} else if aspectRatio != "" {
+		imgConfig.ImageConfig = &genai.ImageConfig{
+			AspectRatio: aspectRatio,
+		}
+	}
+
+	resp, err := genaiClient.Models.GenerateContent(ctx, model, genai.Text(prompt), imgConfig)
+	if err != nil {
+		log.Printf("[AiChat] Image generation failed: %v", err)
+		return map[string]any{
+			"success": false,
+			"error":   err.Error(),
+		}
+	}
+
+	if len(resp.Candidates) == 0 {
+		return map[string]any{
+			"success": false,
+			"error":   "No image generated",
+		}
+	}
+
+	// Find image data in response
+	for _, candidate := range resp.Candidates {
+		for _, part := range candidate.Content.Parts {
+			if part.InlineData != nil {
+				// Save image to file
+				ext := ".png"
+				if strings.Contains(part.InlineData.MIMEType, "jpeg") {
+					ext = ".jpg"
+				} else if strings.Contains(part.InlineData.MIMEType, "webp") {
+					ext = ".webp"
+				}
+
+				filename := fmt.Sprintf("img_%d%s", time.Now().UnixNano(), ext)
+				filePath := filepath.Join(GeneratedImagesDir, filename)
+
+				err := os.WriteFile(filePath, part.InlineData.Data, 0644)
+				if err != nil {
+					log.Printf("[AiChat] Failed to save image: %v", err)
+					return map[string]any{
+						"success": false,
+						"error":   "Failed to save image",
+					}
+				}
+
+				log.Printf("[AiChat] Image saved to %s (%d bytes)", filePath, len(part.InlineData.Data))
+
+				return map[string]any{
+					"success":   true,
+					"file_path": filePath,
+					"prompt":    prompt,
+					"size":      len(part.InlineData.Data),
+				}
+			}
+		}
+	}
+
+	return map[string]any{
+		"success": false,
+		"error":   "No image data in response",
+	}
+}
+
+func executeSendFile(args map[string]any, chatID int64, replyToMsgID int32) map[string]any {
+	filePath, _ := args["file_path"].(string)
+
+	if filePath == "" {
+		return map[string]any{
+			"success": false,
+			"error":   "file_path is required",
+		}
+	}
+
+	// Verify file exists
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return map[string]any{
+			"success": false,
+			"error":   "File not found",
+		}
+	}
+
+	log.Printf("[AiChat] Sending file %s to chat %d", filePath, chatID)
+
+	// Send as document (file) to avoid Telegram compression
+	_, err := botClient.SendMedia(chatID, filePath, &telegram.MediaOptions{
+		ReplyTo: &telegram.InputReplyToMessage{
+			ReplyToMsgID: replyToMsgID,
+		},
+		Caption:       "🎨 Generated image",
+		ForceDocument: true,
+	})
+
+	if err != nil {
+		log.Printf("[AiChat] Failed to send file: %v", err)
+		return map[string]any{
+			"success": false,
+			"error":   err.Error(),
+		}
+	}
+
+	return map[string]any{
+		"success": true,
+		"message": "File sent successfully",
+	}
+}
+
+func executeRunCode(args map[string]any) map[string]any {
+	language, _ := args["language"].(string)
+	code, _ := args["code"].(string)
+
+	if language == "" || code == "" {
+		return map[string]any{
+			"success": false,
+			"error":   "language and code are required",
+		}
+	}
+
+	// Validate language
+	validLanguages := map[string]bool{"python": true, "bash": true, "javascript": true}
+	if !validLanguages[language] {
+		return map[string]any{
+			"success": false,
+			"error":   "Invalid language. Use: python, bash, or javascript",
+		}
+	}
+
+	containerName := os.Getenv("CODE_RUNNER_CONTAINER")
+	if containerName == "" {
+		containerName = "zeno-code-runner"
+	}
+
+	// Build the command based on language
+	var cmdArgs []string
+	switch language {
+	case "python":
+		cmdArgs = []string{"docker", "exec", containerName, "python3", "-c", code}
+	case "bash":
+		cmdArgs = []string{"docker", "exec", containerName, "bash", "-c", code}
+	case "javascript":
+		cmdArgs = []string{"docker", "exec", containerName, "bun", "-e", code}
+	}
+
+	log.Printf("[AiChat] Running code (%s): %s", language, truncateString(code, 100))
+
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+
+	output := stdout.String()
+	errOutput := stderr.String()
+
+	if ctx.Err() == context.DeadlineExceeded {
+		return map[string]any{
+			"success": false,
+			"error":   "Execution timed out (30s limit)",
+		}
+	}
+
+	if err != nil {
+		log.Printf("[AiChat] Code execution error: %v, stderr: %s", err, errOutput)
+		return map[string]any{
+			"success": false,
+			"error":   fmt.Sprintf("Execution failed: %s", errOutput),
+			"output":  output,
+		}
+	}
+
+	log.Printf("[AiChat] Code execution successful, output length: %d", len(output))
+
+	return map[string]any{
+		"success": true,
+		"output":  output,
+	}
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 func storeGroundingLinks(chunks []*genai.GroundingChunk) (string, error) {
@@ -454,11 +791,8 @@ func handleGetVertexLinks(cb *telegram.CallbackQuery) error {
 		sb.WriteString(fmt.Sprintf("%d. %s\n%s\n\n", i+1, link.Title, link.URI))
 	}
 
-	// Send reply to the chat where button was clicked
-	// cb.ChatID is int64
 	botClient.SendMessage(cb.ChatID, sb.String(), nil)
 
-	// Mark as sent
 	db.Collection("vertexlinks").UpdateOne(ctx, bson.M{"_id": objID}, bson.M{"$set": bson.M{"sent": true}})
 
 	cb.Answer("Links sent!", nil)
@@ -583,12 +917,10 @@ func getMessageWithMedia(chatID int64, msgID int32) (*ChatMessage, *genai.Part) 
 	msg := msgs[0]
 	text := msg.Text()
 
-	// Check for media
 	var mediaPart *genai.Part
 	if msg.Media() != nil {
 		mediaData, mimeType, fileName := downloadMedia(&msg)
 		if mediaData != nil {
-			// Append file info to text
 			text = fmt.Sprintf("[File: %s] %s", fileName, text)
 			mediaPart = &genai.Part{
 				InlineData: &genai.Blob{
@@ -620,13 +952,11 @@ func downloadMedia(msg *telegram.NewMessage) ([]byte, string, string) {
 		mimeType = "image/jpeg"
 		fileName = "photo.jpg"
 	case *telegram.MessageMediaDocument:
-		// Skip inspection to avoid type errors
 		mimeType = "application/octet-stream"
 	default:
 		return nil, "", ""
 	}
 
-	// Download media (gogram returns path)
 	path, err := botClient.DownloadMedia(msg.Message.Media, &telegram.DownloadOptions{})
 	if err != nil {
 		log.Printf("[AiChat] Failed to download media: %v", err)
@@ -634,9 +964,7 @@ func downloadMedia(msg *telegram.NewMessage) ([]byte, string, string) {
 	}
 	defer os.Remove(path)
 
-	// Extract filename from download path
 	if fileName == "" || fileName == "photo.jpg" {
-		// If it's a document, we prefer the actual filename
 		extracted := extractFileName(path)
 		if extracted != "" {
 			fileName = extracted
@@ -649,7 +977,6 @@ func downloadMedia(msg *telegram.NewMessage) ([]byte, string, string) {
 		return nil, "", ""
 	}
 
-	// Check size after download
 	if int64(len(data)) > maxMediaSize {
 		log.Printf("[AiChat] Downloaded media too large: %d bytes", len(data))
 		return nil, "", ""
@@ -691,89 +1018,4 @@ func getRepliedMessageSenderID(chatID int64, msgID int32) int64 {
 	}
 
 	return 0
-}
-
-func processImageGenerationQueue() {
-	log.Println("[AiChat] Image generation worker started")
-	for req := range imageQueue {
-		log.Printf("[AiChat] Processing image request: %q", req.Prompt)
-		generateAndSendImage(req)
-	}
-}
-
-func generateAndSendImage(req ImageRequest) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	log.Printf("[AiChat] Requesting image generation with model %s for prompt: %q", config.ImageModel, req.Prompt)
-
-	configAI := &genai.GenerateContentConfig{
-		ResponseModalities: []string{"IMAGE"},
-	}
-
-	resp, err := genaiClient.Models.GenerateContent(
-		ctx,
-		config.ImageModel,
-		genai.Text(req.Prompt),
-		configAI,
-	)
-	if err != nil {
-		log.Printf("[AiChat] Image generation API call failed: %v", err)
-		botClient.SendMessage(req.ChatID, fmt.Sprintf("❌ Failed to generate image: %v", err), &telegram.SendOptions{ReplyID: req.ReplyToMsgID})
-		return
-	}
-
-	if len(resp.Candidates) == 0 {
-		log.Printf("[AiChat] Model returned zero candidates for prompt: %q", req.Prompt)
-		botClient.SendMessage(req.ChatID, "❌ Model returned zero candidates.", &telegram.SendOptions{ReplyID: req.ReplyToMsgID})
-		return
-	}
-
-	for i, candidate := range resp.Candidates {
-		log.Printf("[AiChat] Candidate %d: FinishReason=%v, PartsCount=%d", i, candidate.FinishReason, len(candidate.Content.Parts))
-		for j, part := range candidate.Content.Parts {
-			if part.Text != "" {
-				log.Printf("[AiChat] Part %d.%d contains text: %q", i, j, part.Text)
-			}
-			if part.InlineData != nil {
-				log.Printf("[AiChat] Part %d.%d contains inline data (MimeType: %s, DataLength: %d)", i, j, part.InlineData.MIMEType, len(part.InlineData.Data))
-
-				// Save temp file
-				tmpFile, err := os.CreateTemp("", "genai-*.png")
-				if err != nil {
-					log.Printf("[AiChat] Failed to create temp file: %v", err)
-					continue
-				}
-				tmpPath := tmpFile.Name()
-				defer os.Remove(tmpPath)
-
-				if _, err := tmpFile.Write(part.InlineData.Data); err != nil {
-					log.Printf("[AiChat] Failed to write image data: %v", err)
-					continue
-				}
-				tmpFile.Close()
-
-				log.Printf("[AiChat] Image saved to %s (size: %d), sending to Telegram...", tmpPath, len(part.InlineData.Data))
-
-				// Send as photo
-				_, err = botClient.SendMedia(req.ChatID, tmpPath, &telegram.MediaOptions{
-					ReplyTo: &telegram.InputReplyToMessage{
-						ReplyToMsgID: req.ReplyToMsgID,
-					},
-					Caption: fmt.Sprintf("🎨 %s", req.Prompt),
-				})
-
-				if err != nil {
-					log.Printf("[AiChat] Failed to send photo: %v", err)
-					botClient.SendMessage(req.ChatID, "❌ Failed to send generated image.", &telegram.SendOptions{ReplyID: req.ReplyToMsgID})
-				}
-				return // Only send first image
-			} else {
-				log.Printf("[AiChat] Part %d.%d does not contain InlineData", i, j)
-			}
-		}
-	}
-
-	log.Printf("[AiChat] No image data found in any candidate for prompt: %q", req.Prompt)
-	botClient.SendMessage(req.ChatID, "❌ Model did not return an image.", &telegram.SendOptions{ReplyID: req.ReplyToMsgID})
 }

@@ -19,6 +19,7 @@ var (
 	MaxMediaSize   int64
 	DefaultModel   string
 	ImageModel     string
+	HighImageModel string
 )
 
 func Load() {
@@ -81,5 +82,10 @@ func Load() {
 	ImageModel = os.Getenv("IMAGE_MODEL")
 	if ImageModel == "" {
 		ImageModel = "gemini-2.5-flash-image"
+	}
+
+	HighImageModel = os.Getenv("HIGH_IMAGE_MODEL")
+	if HighImageModel == "" {
+		HighImageModel = "gemini-3.0-pro-image-preview"
 	}
 }

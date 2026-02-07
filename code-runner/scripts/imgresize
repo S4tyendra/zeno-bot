@@ -1,0 +1,10 @@
+#!/bin/bash
+# Resize an image
+# Usage: imgresize <input> <output> <width>x<height>
+
+if [ $# -lt 3 ]; then
+    echo '{"error": "Usage: imgresize <input> <output> <widthxheight>"}'
+    exit 1
+fi
+
+convert "$1" -resize "$3" "$2" && echo '{"success": true, "output": "'"$2"'"}' || echo '{"error": "Failed to resize"}'

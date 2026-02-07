@@ -9,11 +9,41 @@ services:
       - .env
     environment:
       - MONGODB_URL=mongodb://db:27017
+      - CODE_RUNNER_CONTAINER=zeno-code-runner
     volumes:
       - ./session.dat:/app/session.dat
+      - generated_images:/app/generated
+      - workspace:/app/workspace
+      - /var/run/docker.sock:/var/run/docker.sock # For executing commands in code-runner
     depends_on:
       db:
         condition: service_healthy
+      code-runner:
+        condition: service_started
+
+  code-runner:
+    build:
+      context: ./code-runner
+      dockerfile: Dockerfile
+    container_name: zeno-code-runner
+    restart: unless-stopped
+    volumes:
+      - generated_images:/generated:ro # Read-only access to generated images
+      - workspace:/workspace # Read-write workspace
+    # Resource limits for safety
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    # Security: no network access, read-only root
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=100M
 
   db:
     image: mongo:latest
@@ -29,3 +59,5 @@ services:
 
 volumes:
   mongodb_data:
+  generated_images:
+  workspace:
