@@ -30,7 +30,7 @@ RUN pip3 install --break-system-packages \
 RUN mkdir -p /workspace /generated /scripts
 
 # Add helper scripts
-COPY code-runner/scripts/ /scripts/
+COPY scripts/ /scripts/
 RUN chmod +x /scripts/*
 
 WORKDIR /workspace
