@@ -86,6 +86,6 @@ func Load() {
 
 	HighImageModel = os.Getenv("HIGH_IMAGE_MODEL")
 	if HighImageModel == "" {
-		HighImageModel = "gemini-3.0-pro-image-preview"
+		HighImageModel = "gemini-3-pro-image-preview"
 	}
 }
