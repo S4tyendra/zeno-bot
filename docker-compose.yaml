@@ -13,8 +13,8 @@ services:
     volumes:
       - ./session.dat:/app/session.dat
       - generated_images:/app/generated
-      - workspace:/app/workspace
-      - /var/run/docker.sock:/var/run/docker.sock # For executing commands in code-runner
+      - workspace:/workspace # Same path as code-runner
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       db:
         condition: service_healthy
