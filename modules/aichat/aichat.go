@@ -210,6 +210,9 @@ func Register(client *telegram.Client) {
 	}
 	maxMediaSize = config.MaxMediaSize
 
+	// Initialize Telegraph token
+	ensureTelegraphToken()
+
 	client.On("cmd:askai", handleAskAI, filterAllowed)
 	client.On("message", handleMessage, filterAllowed)
 	client.On("callback:get_vertex_links", handleGetVertexLinks)
@@ -373,6 +376,26 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 	}
 
 	if responseText != "" {
+		if len(responseText) > 1000 {
+			log.Printf("[AiChat] Response length %d > 1000, uploading to Telegraph...", len(responseText))
+
+			// Use sender name for title
+			title := fmt.Sprintf("Response to %s", getSenderName(m))
+
+			url, err := uploadToTelegraph(title, responseText)
+			if err != nil {
+				log.Printf("[AiChat] Failed to upload to Telegraph: %v", err)
+			} else {
+				runes := []rune(responseText)
+				limit := 400
+				if len(runes) > limit {
+					responseText = fmt.Sprintf("%s...\n\n[Full Content](%s)", string(runes[:limit]), url)
+				} else {
+					// Fallback if runes count is low but bytes count is high (unlikely but safe)
+					responseText = fmt.Sprintf("%s\n\n[Full Content](%s)", responseText, url)
+				}
+			}
+		}
 		placeholder.Edit(responseText, &telegram.SendOptions{ParseMode: "Markdown"})
 	}
 
@@ -390,7 +413,7 @@ func processWithFunctionCalling(contents []*genai.Content, chatID int64, replyTo
 		},
 		Temperature:     genai.Ptr(float32(0.9)),
 		TopP:            genai.Ptr(float32(0.95)),
-		MaxOutputTokens: int32(1024),
+		MaxOutputTokens: int32(65536),
 		SafetySettings: []*genai.SafetySetting{
 			{Category: genai.HarmCategoryHarassment, Threshold: genai.HarmBlockThresholdBlockNone},
 			{Category: genai.HarmCategoryHateSpeech, Threshold: genai.HarmBlockThresholdBlockNone},

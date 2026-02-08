@@ -10,16 +10,17 @@ import (
 )
 
 var (
-	BotToken       string
-	MongoDBURL     string
-	AppID          int
-	AppHash        string
-	AIStudioAPIKey string
-	AllowedChatIDs []int64
-	MaxMediaSize   int64
-	DefaultModel   string
-	ImageModel     string
-	HighImageModel string
+	BotToken             string
+	MongoDBURL           string
+	AppID                int
+	AppHash              string
+	AIStudioAPIKey       string
+	AllowedChatIDs       []int64
+	MaxMediaSize         int64
+	DefaultModel         string
+	ImageModel           string
+	HighImageModel       string
+	TelegraphAccessToken string
 )
 
 func Load() {
@@ -88,4 +89,6 @@ func Load() {
 	if HighImageModel == "" {
 		HighImageModel = "gemini-3-pro-image-preview"
 	}
+
+	TelegraphAccessToken = os.Getenv("TELEGRAPH_ACCESS_TOKEN")
 }
