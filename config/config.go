@@ -21,6 +21,7 @@ var (
 	ImageModel           string
 	HighImageModel       string
 	TelegraphAccessToken string
+	PerplexityJWT        string
 )
 
 func Load() {
@@ -91,4 +92,5 @@ func Load() {
 	}
 
 	TelegraphAccessToken = os.Getenv("TELEGRAPH_ACCESS_TOKEN")
+	PerplexityJWT = os.Getenv("PERPLEXITY_JWT")
 }
