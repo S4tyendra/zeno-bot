@@ -22,6 +22,7 @@ var (
 	HighImageModel       string
 	TelegraphAccessToken string
 	PerplexityJWT        string
+	ExchangeRateAPIKey   string
 )
 
 func Load() {
@@ -93,4 +94,5 @@ func Load() {
 
 	TelegraphAccessToken = os.Getenv("TELEGRAPH_ACCESS_TOKEN")
 	PerplexityJWT = os.Getenv("PERPLEXITY_JWT")
+	ExchangeRateAPIKey = os.Getenv("EXCHANGERATE_API_KEY")
 }

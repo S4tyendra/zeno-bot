@@ -5,6 +5,7 @@ import (
 )
 
 func Register(client *telegram.Client) {
+	StartCurrencyService()
 	client.On("cmd:math", handleMath)
 	client.On("cmd:id", handleID)
 }
