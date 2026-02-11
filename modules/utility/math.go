@@ -30,7 +30,7 @@ func init() {
 func handleMath(m *telegram.NewMessage) error {
 	query := m.Args()
 	if query == "" {
-		m.Reply("📐 **Zeno Math & Utility**\n\nUsage: `/math <expression>`\n\n**Examples:**\nConversion: `5 km to miles`, `100 f to c`\nCurrency: `10 USD to INR`, `500 EUR to USD`\nMath: `1+1`, `sqrt(25)`, `pow(2,3)`, `log(100)`\nTime: `now`, `1700000000` (unix timestamp), `now to IST`", &telegram.SendOptions{ParseMode: "Markdown"})
+		m.Reply("📐 **Zeno Math & Utility**\n\nUsage: `/math <expression>`\n\n**Examples:**\nConversion: `5 km to miles`, `100 f to c`\nCurrency: `10 USD to INR`, `500 EUR to USD`\nMath: `1+1`, `sqrt(25)`, `pow(2,3)`, `log(100)`, `log 3`\nTime: `now`, `1700000000` (unix timestamp), `now to IST`", &telegram.SendOptions{ParseMode: "Markdown"})
 		return nil
 	}
 
@@ -45,7 +45,7 @@ func handleMath(m *telegram.NewMessage) error {
 		}
 	}
 
-	// 2. Try Currency Conversion (e.g., "100 USD to INR")
+	// 2. Try Currency Conversion
 	if match := currencyRegex.FindStringSubmatch(strings.TrimSpace(query)); match != nil {
 		amountStr := match[1]
 		from := strings.ToUpper(match[2])
@@ -64,7 +64,6 @@ func handleMath(m *telegram.NewMessage) error {
 			m.Reply(fmt.Sprintf("💱 `%g %s` = **%s %s**", amount, from, valStr, to), &telegram.SendOptions{ParseMode: "Markdown"})
 			return nil
 		}
-		// If fails (unknown currency), fall through to time/math checks
 	}
 
 	// 3. Try Time Zone Conversion
@@ -83,7 +82,6 @@ func handleMath(m *telegram.NewMessage) error {
 					t = time.Unix(ts, 0)
 				}
 			} else {
-				// Fallthrough if it's not a valid timestamp
 			}
 		}
 
@@ -142,7 +140,8 @@ func handleMath(m *telegram.NewMessage) error {
 		return nil
 	}
 
-	// 5. Try Math Evaluation (Expr)
+	// 5. Try Math Evaluation (Expr) with Preprocessing
+	mathQuery := preprocessMath(query)
 	env := map[string]interface{}{
 		"pi":    math.Pi,
 		"e":     math.E,
@@ -167,16 +166,19 @@ func handleMath(m *telegram.NewMessage) error {
 		"min":   math.Min,
 	}
 
-	program, err := expr.Compile(query, expr.Env(env))
+	program, err := expr.Compile(mathQuery, expr.Env(env))
 	if err == nil {
 		output, err := expr.Run(program, env)
 		if err == nil {
 			m.Reply(fmt.Sprintf("🧮 `%s` = **%v**", query, output), &telegram.SendOptions{ParseMode: "Markdown"})
 			return nil
 		}
+	} else {
+		// Log error for debugging if needed, but don't reply yet
+		// fmt.Println("Expr compile error:", err)
 	}
 
-	// 6. Try Unit Converter fallback (implicit/complex input like "1L + 500ml")
+	// 6. Try Unit Converter fallback
 	if result, err := unitConverter.Process(query); err == nil {
 		valStr := fmt.Sprintf("%g", result.Value)
 		m.Reply(fmt.Sprintf("📐 `%s` → **%s %s** (%s)", query, valStr, result.UnitSymbol, result.UnitName), &telegram.SendOptions{ParseMode: "Markdown"})
@@ -190,6 +192,18 @@ func handleMath(m *telegram.NewMessage) error {
 
 	m.Reply("❌ Could not process input. Try `/math 1+1` or `/math 1km to miles`.")
 	return nil
+}
+
+func preprocessMath(query string) string {
+	q := strings.ToLower(query)
+	// Fix: "log 3" -> "log(3)", "sin 30" -> "sin(30)", "sqrt2" -> "sqrt(2)"
+	// Supports optional space between match and number.
+	// NOTE: Does not assume user typed brackets. If user typed "log(3)", regex won't match "3" as immediate neighbor to "log" because of "(".
+	// Regex: Word boundary + Function Name + Optional Space + Number (float/int)
+	funcs := "log|ln|sqrt|sin|cos|tan|asin|acos|atan|cbrt|abs|ceil|floor|round|deg|rad|max|min"
+	re := regexp.MustCompile(fmt.Sprintf(`\b(%s)\s*(\d+(?:\.\d+)?)`, funcs))
+	q = re.ReplaceAllString(q, "$1($2)")
+	return q
 }
 
 func isNumeric(s string) bool {
