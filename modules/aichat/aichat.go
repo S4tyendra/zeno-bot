@@ -110,7 +110,6 @@ func Register(client *telegram.Client) {
 		botUserID = me.ID
 	}
 
-	// Initialize GenAI client
 	ctx := context.Background()
 	genaiClient, err = genai.NewClient(ctx, &genai.ClientConfig{
 		APIKey:  config.AIStudioAPIKey,
@@ -121,31 +120,76 @@ func Register(client *telegram.Client) {
 	}
 	log.Println("[AiChat] GenAI client initialized with function calling support")
 
-	// Initialize configuration
 	for _, id := range config.AllowedChatIDs {
 		allowedChatIDs[id] = true
 	}
 	maxMediaSize = config.MaxMediaSize
 
-	// Initialize Telegraph token
 	ensureTelegraphToken()
 
-	// Initialize Perplexity JWT + start refresh cron
 	initPerplexity()
 	startJWTRefreshCron()
 
 	client.On("cmd:askai", handleAskAI, filterAllowed)
+	client.On("cmd:search", handleSearch, filterAllowed)
 	client.On("message", handleMessage, filterAllowed)
 	client.On("callback:get_vertex_links", handleGetVertexLinks)
 }
 
 func filterAllowed(m *telegram.NewMessage) bool {
-	chatID := m.ChatID()
-	return allowedChatIDs[chatID]
+	if allowedChatIDs[m.ChatID()] {
+		return true
+	}
+	if allowedChatIDs[m.SenderID()] {
+		return true
+	}
+	return false
 }
 
 func handleAskAI(m *telegram.NewMessage) error {
 	return processAIRequest(m, m.Args())
+}
+
+func handleSearch(m *telegram.NewMessage) error {
+	query := m.Args()
+	replyToMsgID := m.ReplyToMsgID()
+
+	if replyToMsgID != 0 {
+		replyMsg, _ := getMessageWithMedia(m.ChatID(), replyToMsgID)
+		if replyMsg != nil && replyMsg.Text != "" {
+			if query != "" {
+				query += "\n\nContext:\n" + replyMsg.Text
+			} else {
+				query = replyMsg.Text
+			}
+		}
+	}
+
+	if query == "" {
+		m.Reply("Usage: /search <query>")
+		return nil
+	}
+
+	placeholder, err := m.Reply("🔍 Searching...")
+	if err != nil {
+		return err
+	}
+
+	res, err := perplexitySearch(query)
+	if err != nil {
+		placeholder.Edit(fmt.Sprintf("❌ Search failed: %v", err))
+		return nil
+	}
+
+	responseText := res.Answer
+	if len(res.Sources) > 0 {
+		responseText += "\n\n**Sources:**"
+		for i, source := range res.Sources {
+			responseText += fmt.Sprintf("\n%d. [%s](%s)", i+1, source.Name, source.URL)
+		}
+	}
+
+	return sendLargeResponse(m, placeholder, responseText)
 }
 
 func handleMessage(m *telegram.NewMessage) error {
@@ -182,6 +226,16 @@ func handleMessage(m *telegram.NewMessage) error {
 					query = strings.TrimSpace(query)
 					break
 				}
+			}
+		}
+	}
+
+	if !triggered && allowedChatIDs[m.ChatID()] {
+		if text != "" && !strings.HasPrefix(text, "/") {
+			if time.Now().UnixNano()%10 == 0 {
+				triggered = true
+				query = text
+				log.Printf("[AiChat] Randomly triggered for chatID=%d", m.ChatID())
 			}
 		}
 	}
@@ -281,30 +335,42 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 		return nil
 	}
 
-	if responseText != "" {
-		if len(responseText) > 1000 {
-			log.Printf("[AiChat] Response length %d > 1000, uploading to Telegraph...", len(responseText))
+	if sourcesURL != "" {
+		responseText += fmt.Sprintf("\n\n[SOURCES](%s)", sourcesURL)
+	}
+
+	return sendLargeResponse(m, placeholder, responseText)
+}
+
+func sendLargeResponse(m *telegram.NewMessage, placeholder *telegram.NewMessage, text string) error {
+	if text != "" {
+		if len(text) > 4000 { 
+			log.Printf("[AiChat] Response length %d > 4000, uploading to Telegraph...", len(text))
 			title := fmt.Sprintf("Response to %s", getSenderName(m))
 
-			url, err := uploadToTelegraph(title, responseText)
+			url, err := uploadToTelegraph(title, text)
 			if err != nil {
 				log.Printf("[AiChat] Failed to upload to Telegraph: %v", err)
+				if len(text) > 4000 {
+					text = text[:4000] + "\n...(truncated)"
+				}
 			} else {
-				runes := []rune(responseText)
+				runes := []rune(text)
 				limit := 400
 				if len(runes) > limit {
-					responseText = fmt.Sprintf("%s...\n\n[Full Content](%s)", string(runes[:limit]), url)
+					text = fmt.Sprintf("%s...\n\n[Full Content](%s)", string(runes[:limit]), url)
 				} else {
-					responseText = fmt.Sprintf("%s\n\n[Full Content](%s)", responseText, url)
+					text = fmt.Sprintf("%s\n\n[Full Content](%s)", text, url)
 				}
 			}
 		}
-		if sourcesURL != "" {
-			responseText += fmt.Sprintf("\n\n[SOURCES](%s)", sourcesURL)
-		}
-		placeholder.Edit(responseText, &telegram.SendOptions{ParseMode: "Markdown"})
-	}
 
+		_, err := placeholder.Edit(text, &telegram.SendOptions{ParseMode: "Markdown"})
+		if err != nil {
+			log.Printf("Failed to send markdown: %v. Retrying raw.", err)
+			placeholder.Edit(text)
+		}
+	}
 	return nil
 }
 

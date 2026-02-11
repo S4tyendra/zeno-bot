@@ -8,4 +8,6 @@ func Register(client *telegram.Client) {
 	StartCurrencyService()
 	client.On("cmd:math", handleMath)
 	client.On("cmd:id", handleID)
+	client.On("cmd:help", handleHelp)
+	client.On("cmd:start", handleHelp)
 }

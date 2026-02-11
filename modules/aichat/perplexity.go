@@ -208,7 +208,7 @@ func perplexitySearch(query string) (*PerplexityResult, error) {
 	}
 
 	body := map[string]any{
-		"query_str": query,
+		"query_str": query + "\n\n\n\nYOU MUST SEARCH WEB FOR THIS QUERY",
 		"params": map[string]any{
 			"source":                          "android",
 			"version":                         "2.17",

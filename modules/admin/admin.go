@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strings"
 
+	"zeno/config"
+
 	"github.com/amarnathcjd/gogram/telegram"
 )
 
@@ -24,6 +26,15 @@ func isAdmin(m *telegram.NewMessage) bool {
 	return false
 }
 
+func isAllowedChat(chatID int64) bool {
+	for _, id := range config.AllowedChatIDs {
+		if id == chatID {
+			return true
+		}
+	}
+	return false
+}
+
 func Register(client *telegram.Client) {
 	client.On("cmd:logs", handleLogs)
 }
@@ -31,6 +42,11 @@ func Register(client *telegram.Client) {
 func handleLogs(m *telegram.NewMessage) error {
 	if !isAdmin(m) {
 		m.Reply("🚫 Not authorized.")
+		return nil
+	}
+
+	if !m.IsPrivate() && !isAllowedChat(m.ChatID()) {
+		m.Reply("🚫 context not allowed.")
 		return nil
 	}
 
@@ -46,11 +62,9 @@ func handleLogs(m *telegram.NewMessage) error {
 	out, err := cmd.CombinedOutput()
 
 	if err != nil {
-		// Fallback: try reading from docker logs
 		cmd = exec.Command("docker", "logs", "--tail", lines, "zeno-bot")
 		out, err = cmd.CombinedOutput()
 		if err != nil {
-			// Last fallback: tail the reflex output
 			cmd = exec.Command("tail", "-n", lines, "/tmp/zeno.log")
 			out, err = cmd.CombinedOutput()
 			if err != nil {
@@ -66,7 +80,6 @@ func handleLogs(m *telegram.NewMessage) error {
 		return nil
 	}
 
-	// Telegram message limit is ~4096 chars
 	if len(output) > 3900 {
 		output = output[len(output)-3900:]
 	}
