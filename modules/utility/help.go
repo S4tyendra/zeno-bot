@@ -17,6 +17,7 @@ Here are the available commands:
 
 **Utilities**
 • /math <expr> - Math, Unit & Currency conversion
+  _(Note: 'KB', 'MB' = Bytes; Use 'kbit', 'mbit' for Bits. All data units are 1024-based)_
 • /id - Get your User & Chat ID
 • /logs - View system logs (Admin only)
 
