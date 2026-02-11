@@ -5,7 +5,7 @@ import (
 )
 
 func handleHelp(m *telegram.NewMessage) error {
-	helpText := `🤖 **Zeno Bot Help**
+	helpText := `🤖 **Bot Help**
 
 Here are the available commands:
 
