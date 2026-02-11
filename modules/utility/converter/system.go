@@ -427,6 +427,100 @@ func NewTimeSystem() UnitSystem {
 	}
 }
 
+func NewDataSystem() UnitSystem {
+	return UnitSystem{
+		Name:     "Data",
+		BaseUnit: "Bytes",
+		Units: map[string]Unit{
+			"Bits": {
+				Name:         "Bits",
+				Symbol:       "bit",
+				Aliases:      []string{"bits"},
+				ToBaseFunc:   func(val float64) float64 { return val / 8.0 },
+				FromBaseFunc: func(val float64) float64 { return val * 8.0 },
+			},
+			"Bytes": {
+				Name:         "Bytes",
+				Symbol:       "B",
+				Aliases:      []string{"byte", "bytes", "b"},
+				ToBaseFunc:   func(val float64) float64 { return val },
+				FromBaseFunc: func(val float64) float64 { return val },
+			},
+			"Kilobytes": {
+				Name:         "Kilobytes",
+				Symbol:       "KB",
+				Aliases:      []string{"kb", "kilobyte", "kilobytes"},
+				ToBaseFunc:   func(val float64) float64 { return val * 1024 },
+				FromBaseFunc: func(val float64) float64 { return val / 1024 },
+			},
+			"Megabytes": {
+				Name:         "Megabytes",
+				Symbol:       "MB",
+				Aliases:      []string{"mb", "megabyte", "megabytes"},
+				ToBaseFunc:   func(val float64) float64 { return val * 1048576 },
+				FromBaseFunc: func(val float64) float64 { return val / 1048576 },
+			},
+			"Gigabytes": {
+				Name:         "Gigabytes",
+				Symbol:       "GB",
+				Aliases:      []string{"gb", "gigabyte", "gigabytes"},
+				ToBaseFunc:   func(val float64) float64 { return val * 1073741824 },
+				FromBaseFunc: func(val float64) float64 { return val / 1073741824 },
+			},
+			"Terabytes": {
+				Name:         "Terabytes",
+				Symbol:       "TB",
+				Aliases:      []string{"tb", "terabyte", "terabytes"},
+				ToBaseFunc:   func(val float64) float64 { return val * 1099511627776 },
+				FromBaseFunc: func(val float64) float64 { return val / 1099511627776 },
+			},
+			"Petabytes": {
+				Name:         "Petabytes",
+				Symbol:       "PB",
+				Aliases:      []string{"pb", "petabyte", "petabytes"},
+				ToBaseFunc:   func(val float64) float64 { return val * 1.125899906842624e15 },
+				FromBaseFunc: func(val float64) float64 { return val / 1.125899906842624e15 },
+			},
+			// IEC Binary Prefixes (Standards-compliant 1024 bases)
+			"Kibibytes": {
+				Name:         "Kibibytes",
+				Symbol:       "KiB",
+				Aliases:      []string{"kib", "kibibyte", "kibibytes"},
+				ToBaseFunc:   func(val float64) float64 { return val * 1024 },
+				FromBaseFunc: func(val float64) float64 { return val / 1024 },
+			},
+			"Mebibytes": {
+				Name:         "Mebibytes",
+				Symbol:       "MiB",
+				Aliases:      []string{"mib", "mebibyte", "mebibytes"},
+				ToBaseFunc:   func(val float64) float64 { return val * 1048576 },
+				FromBaseFunc: func(val float64) float64 { return val / 1048576 },
+			},
+			"Gibibytes": {
+				Name:         "Gibibytes",
+				Symbol:       "GiB",
+				Aliases:      []string{"gib", "gibibyte", "gibibytes"},
+				ToBaseFunc:   func(val float64) float64 { return val * 1073741824 },
+				FromBaseFunc: func(val float64) float64 { return val / 1073741824 },
+			},
+			"Tebibytes": {
+				Name:         "Tebibytes",
+				Symbol:       "TiB",
+				Aliases:      []string{"tib", "tebibyte", "tebibytes"},
+				ToBaseFunc:   func(val float64) float64 { return val * 1099511627776 },
+				FromBaseFunc: func(val float64) float64 { return val / 1099511627776 },
+			},
+			"Pebibytes": {
+				Name:         "Pebibytes",
+				Symbol:       "PiB",
+				Aliases:      []string{"pib", "pebibyte", "pebibytes"},
+				ToBaseFunc:   func(val float64) float64 { return val * 1.125899906842624e15 },
+				FromBaseFunc: func(val float64) float64 { return val / 1.125899906842624e15 },
+			},
+		},
+	}
+}
+
 // MustRegisterSystems merges all unit systems into a single alias→Unit map.
 func MustRegisterSystems() map[string]Unit {
 	systems := []UnitSystem{
@@ -437,16 +531,17 @@ func MustRegisterSystems() map[string]Unit {
 		NewAreaSystem(),
 		NewSpeedSystem(),
 		NewTimeSystem(),
+		NewDataSystem(),
 	}
 
 	unitMap := make(map[string]Unit)
 	for _, system := range systems {
-		for _, unit := range system.Units {
-			for _, alias := range unit.Aliases {
-				unitMap[strings.ToLower(alias)] = unit
+		for _, systemUnit := range system.Units {
+			for _, alias := range systemUnit.Aliases {
+				unitMap[strings.ToLower(alias)] = systemUnit
 			}
-			unitMap[strings.ToLower(unit.Name)] = unit
-			unitMap[strings.ToLower(unit.Symbol)] = unit
+			unitMap[strings.ToLower(systemUnit.Name)] = systemUnit
+			unitMap[strings.ToLower(systemUnit.Symbol)] = systemUnit
 		}
 	}
 	return unitMap
