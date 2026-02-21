@@ -127,13 +127,16 @@ func Register(client *telegram.Client) {
 	initPerplexity()
 	startJWTRefreshCron()
 
-	client.On("cmd:askai", handleAskAI, filterAllowed)
-	client.On("cmd:search", handleSearch, filterAllowed)
-	client.On("message", handleMessage, filterAllowed)
+	client.On("cmd:askai", handleAskAI)
+	client.On("cmd:search", handleSearch)
+	client.On("message", handleMessage)
 	client.On("callback:get_vertex_links", handleGetVertexLinks)
 }
 
 func filterAllowed(m *telegram.NewMessage) bool {
+	if len(allowedChatIDs) == 0 {
+		return true
+	}
 	if allowedChatIDs[m.ChatID()] {
 		return true
 	}
@@ -144,10 +147,16 @@ func filterAllowed(m *telegram.NewMessage) bool {
 }
 
 func handleAskAI(m *telegram.NewMessage) error {
+	if !filterAllowed(m) {
+		return nil
+	}
 	return processAIRequest(m, m.Args())
 }
 
 func handleSearch(m *telegram.NewMessage) error {
+	if !filterAllowed(m) {
+		return nil
+	}
 	query := m.Args()
 	replyToMsgID := m.ReplyToMsgID()
 
@@ -190,6 +199,9 @@ func handleSearch(m *telegram.NewMessage) error {
 }
 
 func handleMessage(m *telegram.NewMessage) error {
+	if !filterAllowed(m) {
+		return nil
+	}
 	text := m.Text()
 
 	if strings.HasPrefix(text, "/") {
