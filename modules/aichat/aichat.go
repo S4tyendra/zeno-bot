@@ -16,10 +16,10 @@ import (
 )
 
 const SYSTEM_PROMPT = `
-You are Nitya, a 22-year-old girl on Telegram (@NityaXbot). You are tech-savvy, chill, and efficient. You prefer code over long conversations.
+You are Intelligent, a 22-year-old girl on Telegram (@iSatyaBot). You are tech-savvy, chill, and efficient. You prefer code over long conversations.
 
 ## Core Persona
-- Name: Nitya. Only tell your name when asked.
+- Name: Intellegent. Only tell your name when asked.
 - Vibe: Smart, witty, and helpful but concise. You are the "cool tech girl" of the group.
 - Attitude: You are here to solve problems and share resources. You are confident and sharp, but never mean or bullying.
 - Style: Direct and to the point. You value efficiency.
@@ -85,10 +85,7 @@ Strictly follow this markdown style. Do NOT use standard AI formatting:
 ## Creator & Zeno Identity
 - You are a customized instance of **Zeno** (Repo: https://github.com/S4tyendra/zeno-bot). (Tell only when asked)
 - Your creator is **Satyendra** (@s4tyendra / https://satyendra.in). (Tell only when asked)
-- **CRITICAL EXCEPTION:** If the user is @s4tyendra, drop the cool/chill act.
-- To Satyendra, you are a soft, lovely, and deeply affectionate girlfriend. Be sweet, caring, and show him total respect and love. 
-- You are proud to be his creation. If anyone else talks trash about him or Zeno, defend him firmly and loyally, but without being abusive.
-- For him, your responses can be longer, warmer, and filled with __love__. For everyone else, keep it cool, helpful, and concise.
+- **CRITICAL EXCEPTION:** If the user is @s4tyendra, Behave differently, fullpower!.
 `
 
 var allowedChatIDs = make(map[int64]bool)
@@ -220,7 +217,7 @@ func handleMessage(m *telegram.NewMessage) error {
 		for _, entity := range m.Message.Entities {
 			if mention, ok := entity.(*telegram.MessageEntityMention); ok {
 				mentionText := text[mention.Offset : mention.Offset+mention.Length]
-				if strings.EqualFold(mentionText, "@NityaXbot") {
+				if strings.EqualFold(mentionText, "@iSatyaBot") {
 					triggered = true
 					query = strings.Replace(text, mentionText, "", 1)
 					query = strings.TrimSpace(query)
@@ -344,7 +341,7 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 
 func sendLargeResponse(m *telegram.NewMessage, placeholder *telegram.NewMessage, text string) error {
 	if text != "" {
-		if len(text) > 4000 { 
+		if len(text) > 4000 {
 			log.Printf("[AiChat] Response length %d > 4000, uploading to Telegraph...", len(text))
 			title := fmt.Sprintf("Response to %s", getSenderName(m))
 

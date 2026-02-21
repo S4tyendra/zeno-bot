@@ -82,8 +82,8 @@ func ensureTelegraphToken() {
 func createTelegraphAccount() (TelegraphAccount, error) {
 	// API endpoint: https://api.telegra.ph/createAccount
 	data := url.Values{}
-	data.Set("short_name", "Nitya")
-	data.Set("author_name", "Nitya")
+	data.Set("short_name", "Intelligent")
+	data.Set("author_name", "Intelligent")
 
 	resp, err := http.PostForm("https://api.telegra.ph/createAccount", data)
 	if err != nil {
@@ -128,7 +128,7 @@ func uploadToTelegraph(title, content string) (string, error) {
 	data := url.Values{}
 	data.Set("access_token", config.TelegraphAccessToken)
 	data.Set("title", title)
-	data.Set("author_name", "Nitya")
+	data.Set("author_name", "Intelligent")
 	data.Set("content", string(nodesBytes))
 	data.Set("return_content", "true")
 
