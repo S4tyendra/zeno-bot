@@ -42,7 +42,7 @@ func init() {
 			},
 			"high_quality": {
 				"type": "boolean",
-				"description": "Use HIGH mode (Gemini 3 Pro, 2K). COSTS MORE - only use when @s4tyendra explicitly requests."
+				"description": "Use HIGH mode (4K resolution). COSTS MORE - only use when @s4tyendra explicitly requests."
 			}
 		},
 		"required": ["prompt"]
@@ -160,23 +160,21 @@ func executeCreateImage(args map[string]any) map[string]any {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	imgConfig := &genai.GenerateContentConfig{
-		ResponseModalities: []string{"IMAGE"},
+	if aspectRatio == "" {
+		aspectRatio = "9:16"
 	}
 
+	imageSize := "1K"
 	if highQuality {
-		imgConfig.ImageConfig = &genai.ImageConfig{
-			ImageSize: "2K",
-		}
-		if aspectRatio != "" {
-			imgConfig.ImageConfig.AspectRatio = aspectRatio
-		} else {
-			imgConfig.ImageConfig.AspectRatio = "9:16"
-		}
-	} else if aspectRatio != "" {
-		imgConfig.ImageConfig = &genai.ImageConfig{
+		imageSize = "4K"
+	}
+
+	imgConfig := &genai.GenerateContentConfig{
+		ResponseModalities: []string{"IMAGE"},
+		ImageConfig: &genai.ImageConfig{
 			AspectRatio: aspectRatio,
-		}
+			ImageSize:   imageSize,
+		},
 	}
 
 	resp, err := genaiClient.Models.GenerateContent(ctx, model, genai.Text(prompt), imgConfig)

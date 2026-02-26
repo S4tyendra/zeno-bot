@@ -84,12 +84,12 @@ func Load() {
 
 	ImageModel = os.Getenv("IMAGE_MODEL")
 	if ImageModel == "" {
-		ImageModel = "gemini-2.5-flash-image"
+		ImageModel = "gemini-3.1-flash-image-preview"
 	}
 
 	HighImageModel = os.Getenv("HIGH_IMAGE_MODEL")
 	if HighImageModel == "" {
-		HighImageModel = "gemini-3-pro-image-preview"
+		HighImageModel = "gemini-3.1-flash-image-preview"
 	}
 
 	TelegraphAccessToken = os.Getenv("TELEGRAPH_ACCESS_TOKEN")
