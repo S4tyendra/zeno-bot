@@ -25,7 +25,8 @@ RUN pip3 install --break-system-packages \
     httpx \
     colorthief \
     opencv-python-headless \
-    MultiFeatures
+    MultiFeatures \
+    yt-dlp
 
 # Create directories
 RUN mkdir -p /workspace /generated /scripts

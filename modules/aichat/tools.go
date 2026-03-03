@@ -279,7 +279,7 @@ func executeRunCode(args map[string]any) map[string]any {
 
 	log.Printf("[AiChat] Running code (%s): %s", language, truncateString(code, 100))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
@@ -292,7 +292,7 @@ func executeRunCode(args map[string]any) map[string]any {
 	errOutput := stderr.String()
 
 	if ctx.Err() == context.DeadlineExceeded {
-		return map[string]any{"success": false, "error": "Execution timed out (30s limit)"}
+		return map[string]any{"success": false, "error": "Execution timed out (300s limit)"}
 	}
 
 	if err != nil {
