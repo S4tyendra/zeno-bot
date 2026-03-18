@@ -96,6 +96,7 @@ var (
 	botUserID   int64
 	genaiClient *genai.Client
 	askPattern  = regexp.MustCompile(`(?i)@ask\b`)
+	gptPattern  = regexp.MustCompile(`(?i)(?:^|\s)/gpt\b`)
 )
 
 var maxMediaSize int64
@@ -129,6 +130,7 @@ func Register(client *telegram.Client) {
 	startJWTRefreshCron()
 
 	client.On("cmd:askai", handleAskAI)
+	client.On("cmd:gpt", handleGPT)
 	client.On("cmd:search", handleSearch)
 	client.On("message", handleMessage)
 	client.On("callback:get_vertex_links", handleGetVertexLinks)
@@ -255,6 +257,14 @@ func handleMessage(m *telegram.NewMessage) error {
 	}
 
 	log.Printf("[AiChat] Handled message trigger: query=%q, chatID=%d, sender=%s", query, m.ChatID(), getSenderName(m))
+
+	// If the message contains /gpt, strip the token and route to GPT
+	if gptPattern.MatchString(query) {
+		query = strings.TrimSpace(gptPattern.ReplaceAllString(query, ""))
+		log.Printf("[AiChat] Routing to GPT: query=%q", query)
+		return processGPTRequest(m, query)
+	}
+
 	return processAIRequest(m, query)
 }
 
@@ -294,20 +304,42 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 		mediaData, mimeType, fileName := downloadMedia(m)
 		if mediaData != nil {
 			log.Printf("[AiChat] Received media from user: %s (%s)", fileName, mimeType)
-			parts = append(parts, &genai.Part{
-				InlineData: &genai.Blob{
-					Data:     mediaData,
-					MIMEType: mimeType,
-				},
-			})
-			contextBuilder.WriteString(fmt.Sprintf("[User sent a file: %s]\n", fileName))
+
+			if strings.HasPrefix(mimeType, "image/") {
+				parts = append(parts, &genai.Part{
+					InlineData: &genai.Blob{
+						Data:     mediaData,
+						MIMEType: mimeType,
+					},
+				})
+				contextBuilder.WriteString(fmt.Sprintf("[User sent an image file: %s]\n", fileName))
+			} else if mimeType == "application/pdf" || strings.HasSuffix(strings.ToLower(fileName), ".pdf") {
+				imgs, err := pdfToImages(mediaData, 10)
+				if err == nil {
+					for _, imgBytes := range imgs {
+						parts = append(parts, &genai.Part{
+							InlineData: &genai.Blob{
+								Data:     imgBytes,
+								MIMEType: "image/jpeg",
+							},
+						})
+					}
+					contextBuilder.WriteString(fmt.Sprintf("[User sent a PDF file %s, converted to %d images]\n", fileName, len(imgs)))
+				} else {
+					contextBuilder.WriteString(fmt.Sprintf("[Failed to read PDF %s: %v]\n", fileName, err))
+				}
+			} else if isTextFile(fileName, mimeType) {
+				contextBuilder.WriteString(fmt.Sprintf("\n--- File: %s ---\n%s\n---\n", fileName, string(mediaData)))
+			} else {
+				contextBuilder.WriteString(fmt.Sprintf("[User sent unsupported file: %s]\n", fileName))
+			}
 		}
 	}
 
 	parts = append(parts, &genai.Part{Text: contextBuilder.String()})
 
 	if replyToMsgID != 0 {
-		replyMsg, mediaPart := getMessageWithMedia(chatID, replyToMsgID)
+		replyMsg, mediaParts := getMessageWithMedia(chatID, replyToMsgID)
 		if replyMsg != nil {
 			contextBuilder.WriteString("---\n")
 			contextBuilder.WriteString(replyMsg.Sender)
@@ -317,8 +349,28 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 
 			parts[len(parts)-1] = &genai.Part{Text: contextBuilder.String()}
 
-			if mediaPart != nil {
-				parts = append(parts, mediaPart)
+			if len(mediaParts) > 0 {
+				for _, rp := range mediaParts {
+					if rp.InlineData == nil {
+						continue
+					}
+					if rp.InlineData.MIMEType == "application/pdf" {
+						// Gemini can't handle raw PDF inline — convert to images
+						imgs, err := pdfToImages(rp.InlineData.Data, 10)
+						if err == nil {
+							for _, imgBytes := range imgs {
+								parts = append(parts, &genai.Part{
+									InlineData: &genai.Blob{
+										Data:     imgBytes,
+										MIMEType: "image/jpeg",
+									},
+								})
+							}
+						}
+					} else {
+						parts = append(parts, rp)
+					}
+				}
 			}
 		}
 	}
@@ -353,33 +405,46 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 }
 
 func sendLargeResponse(m *telegram.NewMessage, placeholder *telegram.NewMessage, text string) error {
-	if text != "" {
-		if len(text) > 4000 {
-			log.Printf("[AiChat] Response length %d > 4000, uploading to Telegraph...", len(text))
-			title := fmt.Sprintf("Response to %s", getSenderName(m))
+	if text == "" {
+		return nil
+	}
 
-			url, err := uploadToTelegraph(title, text)
-			if err != nil {
-				log.Printf("[AiChat] Failed to upload to Telegraph: %v", err)
-				if len(text) > 4000 {
-					text = text[:4000] + "\n...(truncated)"
-				}
+	if len(text) > 4000 {
+		log.Printf("[AiChat] Response length %d > 4000, uploading to Telegraph...", len(text))
+		title := fmt.Sprintf("Response to %s", getSenderName(m))
+
+		url, err := uploadToTelegraph(title, text)
+		if err != nil {
+			// Retry once
+			log.Printf("[AiChat] Telegraph upload failed (%v), retrying...", err)
+			url, err = uploadToTelegraph(title, text)
+		}
+
+		if err != nil {
+			log.Printf("[AiChat] Telegraph upload failed after retry: %v", err)
+			// Send first 4096 chars (Telegram limit), clean cut at last newline
+			runes := []rune(text)
+			limit := 4000
+			cut := string(runes[:limit])
+			if idx := strings.LastIndex(cut, "\n"); idx > limit/2 {
+				cut = cut[:idx]
+			}
+			text = cut + "\n\n_(Response too long — Telegraph unavailable)_"
+		} else {
+			runes := []rune(text)
+			limit := 400
+			if len(runes) > limit {
+				text = fmt.Sprintf("%s...\n\n[Full Content](%s)", string(runes[:limit]), url)
 			} else {
-				runes := []rune(text)
-				limit := 400
-				if len(runes) > limit {
-					text = fmt.Sprintf("%s...\n\n[Full Content](%s)", string(runes[:limit]), url)
-				} else {
-					text = fmt.Sprintf("%s\n\n[Full Content](%s)", text, url)
-				}
+				text = fmt.Sprintf("%s\n\n[Full Content](%s)", text, url)
 			}
 		}
+	}
 
-		_, err := placeholder.Edit(text, &telegram.SendOptions{ParseMode: "Markdown"})
-		if err != nil {
-			log.Printf("Failed to send markdown: %v. Retrying raw.", err)
-			placeholder.Edit(text)
-		}
+	_, err := placeholder.Edit(text, &telegram.SendOptions{ParseMode: "Markdown"})
+	if err != nil {
+		log.Printf("[AiChat] Failed to send markdown response: %v. Retrying raw.", err)
+		placeholder.Edit(text)
 	}
 	return nil
 }

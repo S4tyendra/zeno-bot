@@ -121,7 +121,7 @@ func fetchChatHistoryExcluding(chatID int64, currentMsgID int32, excludeReplyID 
 	return result
 }
 
-func getMessageWithMedia(chatID int64, msgID int32) (*ChatMessage, *genai.Part) {
+func getMessageWithMedia(chatID int64, msgID int32) (*ChatMessage, []*genai.Part) {
 	if botClient == nil {
 		return nil, nil
 	}
@@ -134,16 +134,32 @@ func getMessageWithMedia(chatID int64, msgID int32) (*ChatMessage, *genai.Part) 
 	msg := msgs[0]
 	text := msg.Text()
 
-	var mediaPart *genai.Part
+	var mediaParts []*genai.Part
 	if msg.Media() != nil {
 		mediaData, mimeType, fileName := downloadMedia(&msg)
 		if mediaData != nil {
-			text = fmt.Sprintf("[File: %s] %s", fileName, text)
-			mediaPart = &genai.Part{
-				InlineData: &genai.Blob{
-					Data:     mediaData,
-					MIMEType: mimeType,
-				},
+			if strings.HasPrefix(mimeType, "image/") {
+				mediaParts = append(mediaParts, &genai.Part{
+					InlineData: &genai.Blob{
+						Data:     mediaData,
+						MIMEType: mimeType,
+					},
+				})
+				text = fmt.Sprintf("[Image File: %s]\n%s", fileName, text)
+			} else if mimeType == "application/pdf" || strings.HasSuffix(strings.ToLower(fileName), ".pdf") {
+				// Return raw PDF blob — callers decide how to process it
+				// (Gemini: pdfToImages inline; GPT: input_file base64)
+				mediaParts = append(mediaParts, &genai.Part{
+					InlineData: &genai.Blob{
+						Data:     mediaData,
+						MIMEType: "application/pdf",
+					},
+				})
+				text = fmt.Sprintf("[PDF File: %s]\n%s", fileName, text)
+			} else if isTextFile(fileName, mimeType) {
+				text = fmt.Sprintf("\n--- File: %s ---\n%s\n---\n%s", fileName, string(mediaData), text)
+			} else {
+				text = fmt.Sprintf("[Unsupported File: %s]\n%s", fileName, text)
 			}
 		}
 	}
@@ -153,7 +169,7 @@ func getMessageWithMedia(chatID int64, msgID int32) (*ChatMessage, *genai.Part) 
 		Text:   text,
 	}
 
-	return chatMsg, mediaPart
+	return chatMsg, mediaParts
 }
 
 func downloadMedia(msg *telegram.NewMessage) ([]byte, string, string) {

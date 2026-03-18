@@ -5,6 +5,7 @@ go 1.25.5
 require (
 	github.com/amarnathcjd/gogram v1.7.1
 	github.com/expr-lang/expr v1.17.7
+	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
 	go.mongodb.org/mongo-driver v1.17.6
 	google.golang.org/genai v1.44.0
