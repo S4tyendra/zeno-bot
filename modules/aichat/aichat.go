@@ -89,8 +89,6 @@ Strictly follow this markdown style. Do NOT use standard AI formatting:
 - **CRITICAL EXCEPTION:** If the user is @s4tyendra, Behave differently, fullpower!.
 `
 
-var allowedChatIDs = make(map[int64]bool)
-
 var (
 	botClient   *telegram.Client
 	botUserID   int64
@@ -120,12 +118,14 @@ func Register(client *telegram.Client) {
 	log.Println("[AiChat] GenAI client initialized with function calling support")
 
 	for _, id := range config.AllowedChatIDs {
-		allowedChatIDs[id] = true
+		// Legacy: still honour env-provided IDs on startup
+		AddAllowChat(id)
 	}
 	maxMediaSize = config.MaxMediaSize
 
-	ensureTelegraphToken()
+	LoadAllowlist()
 
+	ensureTelegraphToken()
 	initPerplexity()
 	startJWTRefreshCron()
 
@@ -136,18 +136,6 @@ func Register(client *telegram.Client) {
 	client.On("callback:get_vertex_links", handleGetVertexLinks)
 }
 
-func filterAllowed(m *telegram.NewMessage) bool {
-	if len(allowedChatIDs) == 0 {
-		return true
-	}
-	if allowedChatIDs[m.ChatID()] {
-		return true
-	}
-	if allowedChatIDs[m.SenderID()] {
-		return true
-	}
-	return false
-}
 
 func handleAskAI(m *telegram.NewMessage) error {
 	if !filterAllowed(m) {
@@ -242,8 +230,11 @@ func handleMessage(m *telegram.NewMessage) error {
 		}
 	}
 
-	if !triggered && allowedChatIDs[m.ChatID()] {
-		if text != "" && !strings.HasPrefix(text, "/") {
+	if !triggered {
+		allowMu.RLock()
+		chatAllowed := allowedChats[m.ChatID()]
+		allowMu.RUnlock()
+		if chatAllowed && text != "" && !strings.HasPrefix(text, "/") {
 			if time.Now().UnixNano()%10 == 0 {
 				triggered = true
 				query = text

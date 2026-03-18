@@ -2,7 +2,6 @@ package aichat
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -74,12 +73,6 @@ var gptTools = []map[string]interface{}{
 	},
 }
 
-var gptAuthFile string
-
-func init() {
-	home, _ := os.UserHomeDir()
-	gptAuthFile = filepath.Join(home, ".codex", "auth.json")
-}
 
 func handleGPT(m *telegram.NewMessage) error {
 	if !filterAllowed(m) {
@@ -266,70 +259,6 @@ func pdfToImages(pdfData []byte, maxPages int) ([][]byte, error) {
 	return result, nil
 }
 
-func getGPTAuth() (map[string]interface{}, error) {
-	data, err := ioutil.ReadFile(gptAuthFile)
-	if err != nil {
-		return nil, err
-	}
-
-	var auth map[string]interface{}
-	if err := json.Unmarshal(data, &auth); err != nil {
-		return nil, err
-	}
-
-	lastRefStr, ok := auth["last_refresh"].(string)
-	if ok {
-		lastRef, err := time.Parse("2006-01-02T15:04:05.999Z", strings.ReplaceAll(lastRefStr, "+00:00", "Z"))
-		if err == nil {
-			if time.Since(lastRef).Seconds() > 3500 {
-				return refreshGPTAuth(auth)
-			}
-		}
-	}
-
-	return auth, nil
-}
-
-func refreshGPTAuth(auth map[string]interface{}) (map[string]interface{}, error) {
-	log.Println("[AiChat GPT] Refreshing token...")
-	tokens, _ := auth["tokens"].(map[string]interface{})
-	refreshToken, _ := tokens["refresh_token"].(string)
-
-	payload := map[string]string{
-		"grant_type":    "refresh_token",
-		"refresh_token": refreshToken,
-		"client_id":     "app_EMoamEEZ73f0CkXaXp7hrann",
-	}
-	body, _ := json.Marshal(payload)
-
-	resp, err := http.Post("https://auth.openai.com/oauth/token", "application/json", bytes.NewBuffer(body))
-	if err != nil {
-		return auth, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return auth, fmt.Errorf("refresh failed: %d", resp.StatusCode)
-	}
-
-	var res map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&res)
-
-	tokens["access_token"] = res["access_token"]
-	if rt, ok := res["refresh_token"].(string); ok {
-		tokens["refresh_token"] = rt
-	}
-	if it, ok := res["id_token"].(string); ok {
-		tokens["id_token"] = it
-	}
-
-	auth["tokens"] = tokens
-	auth["last_refresh"] = time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
-
-	newData, _ := json.MarshalIndent(auth, "", "  ")
-	ioutil.WriteFile(gptAuthFile, newData, 0644)
-	return auth, nil
-}
 
 type pendingToolCall struct {
 	CallID    string
@@ -395,14 +324,13 @@ func chatGPTLoop(messages []map[string]interface{}, placeholder *telegram.NewMes
 }
 
 func streamGPTOnce(messages []map[string]interface{}, placeholder *telegram.NewMessage) (string, []pendingToolCall, error) {
-	auth, err := getGPTAuth()
+	auth, err := GetGPTAuth()
 	if err != nil {
 		return "", nil, fmt.Errorf("auth error: %v", err)
 	}
 
-	tokens, _ := auth["tokens"].(map[string]interface{})
-	accessToken, _ := tokens["access_token"].(string)
-	accountID, _ := tokens["account_id"].(string)
+	accessToken := auth.AccessToken
+	accountID := auth.AccountID
 
 	body := map[string]interface{}{
 		"model":        "gpt-5.2",
@@ -415,7 +343,7 @@ func streamGPTOnce(messages []map[string]interface{}, placeholder *telegram.NewM
 	}
 
 	reqBody, _ := json.Marshal(body)
-	req, _ := http.NewRequest("POST", "https://chatgpt.com/backend-api/codex/responses", bytes.NewBuffer(reqBody))
+	req, _ := http.NewRequest("POST", "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(string(reqBody)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "text/event-stream")
