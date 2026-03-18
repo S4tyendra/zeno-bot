@@ -136,7 +136,6 @@ func Register(client *telegram.Client) {
 	client.On("callback:get_vertex_links", handleGetVertexLinks)
 }
 
-
 func handleAskAI(m *telegram.NewMessage) error {
 	if !filterAllowed(m) {
 		return nil
@@ -230,18 +229,18 @@ func handleMessage(m *telegram.NewMessage) error {
 		}
 	}
 
-	if !triggered {
-		allowMu.RLock()
-		chatAllowed := allowedChats[m.ChatID()]
-		allowMu.RUnlock()
-		if chatAllowed && text != "" && !strings.HasPrefix(text, "/") {
-			if time.Now().UnixNano()%10 == 0 {
-				triggered = true
-				query = text
-				log.Printf("[AiChat] Randomly triggered for chatID=%d", m.ChatID())
-			}
-		}
-	}
+	// if !triggered {
+	// 	allowMu.RLock()
+	// 	chatAllowed := allowedChats[m.ChatID()]
+	// 	allowMu.RUnlock()
+	// 	if chatAllowed && text != "" && !strings.HasPrefix(text, "/") {
+	// 		if time.Now().UnixNano()%10 == 0 {
+	// 			triggered = true
+	// 			query = text
+	// 			log.Printf("[AiChat] Randomly triggered for chatID=%d", m.ChatID())
+	// 		}
+	// 	}
+	// }
 
 	if !triggered {
 		return nil
