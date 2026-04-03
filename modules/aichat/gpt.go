@@ -333,7 +333,7 @@ func streamGPTOnce(messages []map[string]interface{}, placeholder *telegram.NewM
 	accountID := auth.AccountID
 
 	body := map[string]interface{}{
-		"model":        "gpt-5.2",
+		"model":        "gpt-5.4",
 		"input":        messages,
 		"stream":       true,
 		"store":        false,
