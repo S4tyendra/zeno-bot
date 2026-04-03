@@ -138,13 +138,41 @@ func seedGPTAuthFromEnv() (gptTokenDoc, error) {
 func refreshGPTToken(doc *gptTokenDoc) (*gptTokenDoc, error) {
 	refreshed, err := refreshGPTTokenRaw(*doc)
 	if err != nil {
-		return doc, err // return stale but don't crash
+		// If the refresh token was already rotated by another instance, wipe
+		// the stale DB record and re-seed fresh credentials from .env.
+		if isRefreshTokenReused(err) {
+			log.Println("[GPT Auth] refresh_token_reused — wiping DB and re-seeding from env")
+			purgeGPTAuthFromDB()
+			gptAuthMu.Lock()
+			gptAuthCache = nil
+			gptAuthMu.Unlock()
+			return loadGPTAuth()
+		}
+		return doc, err
 	}
 	saveGPTAuthToDB(&refreshed)
 	gptAuthMu.Lock()
 	gptAuthCache = &refreshed
 	gptAuthMu.Unlock()
 	return &refreshed, nil
+}
+
+// isRefreshTokenReused reports whether err is an OpenAI refresh_token_reused 401.
+func isRefreshTokenReused(err error) bool {
+	return strings.Contains(err.Error(), "refresh_token_reused")
+}
+
+// purgeGPTAuthFromDB deletes the stored GPT auth document from MongoDB.
+func purgeGPTAuthFromDB() {
+	col := db.Collection("gpt_auth")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := col.DeleteOne(ctx, bson.M{"_id": gptMongoID})
+	if err != nil {
+		log.Printf("[GPT Auth] Failed to purge DB record: %v", err)
+	} else {
+		log.Println("[GPT Auth] Purged stale token record from MongoDB")
+	}
 }
 
 func refreshGPTTokenRaw(doc gptTokenDoc) (gptTokenDoc, error) {
@@ -161,13 +189,13 @@ func refreshGPTTokenRaw(doc gptTokenDoc) (gptTokenDoc, error) {
 	}
 	defer resp.Body.Close()
 
+	rawBody, _ := ioutil.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		b, _ := ioutil.ReadAll(resp.Body)
-		return doc, fmt.Errorf("refresh failed %d: %s", resp.StatusCode, string(b))
+		return doc, fmt.Errorf("refresh failed %d: %s", resp.StatusCode, string(rawBody))
 	}
 
 	var res map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&res)
+	json.Unmarshal(rawBody, &res)
 
 	if at, ok := res["access_token"].(string); ok {
 		doc.AccessToken = at
