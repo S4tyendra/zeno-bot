@@ -14,8 +14,10 @@ var (
 	MongoDBURL           string
 	AppID                int
 	AppHash              string
-	AIStudioAPIKey       string
-	AllowedChatIDs       []int64
+	VertexProjectID         string
+	VertexLocation          string
+	VertexCredentialsBase64 string
+	AllowedChatIDs          []int64
 	MaxMediaSize         int64
 	DefaultModel         string
 	ImageModel           string
@@ -53,9 +55,20 @@ func Load() {
 		log.Fatal("APP_HASH is required")
 	}
 
-	AIStudioAPIKey = os.Getenv("AISTUDIO_API_KEY")
-	if AIStudioAPIKey == "" {
-		log.Fatal("AISTUDIO_API_KEY is required")
+	// Vertex AI backend — uses GOOGLE_APPLICATION_CREDENTIALS (service account JSON) for auth.
+	VertexProjectID = os.Getenv("VERTEX_PROJECT_ID")
+	if VertexProjectID == "" {
+		log.Fatal("VERTEX_PROJECT_ID is required (GCP project ID for Vertex AI)")
+	}
+
+	VertexLocation = os.Getenv("VERTEX_LOCATION")
+	if VertexLocation == "" {
+		VertexLocation = "global"
+	}
+
+	VertexCredentialsBase64 = os.Getenv("GOOGLE_APPLICATION_CREDENTIALS_BASE64")
+	if VertexCredentialsBase64 == "" {
+		log.Fatal("GOOGLE_APPLICATION_CREDENTIALS_BASE64 is required (base64 encoded service account JSON key)")
 	}
 
 	allowedChatIDsStr := os.Getenv("ALLOWED_CHAT_IDS")
@@ -79,7 +92,7 @@ func Load() {
 
 	DefaultModel = os.Getenv("DEFAULT_MODEL")
 	if DefaultModel == "" {
-		DefaultModel = "gemini-3.0-flash-preview"
+		DefaultModel = "gemini-3.1-flash-lite"
 	}
 
 	ImageModel = os.Getenv("IMAGE_MODEL")

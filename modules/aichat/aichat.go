@@ -2,6 +2,7 @@ package aichat
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"cloud.google.com/go/auth/credentials"
 	"github.com/amarnathcjd/gogram/telegram"
 	"google.golang.org/genai"
 
@@ -124,14 +126,27 @@ func Register(client *telegram.Client) {
 	}
 
 	ctx := context.Background()
+
+	decodedCreds, err := base64.StdEncoding.DecodeString(config.VertexCredentialsBase64)
+	if err != nil {
+		log.Fatalf("[AiChat] Failed to decode base64 credentials: %v", err)
+	}
+
+	creds, err := credentials.NewCredentialsFromJSON(credentials.ServiceAccount, decodedCreds, nil)
+	if err != nil {
+		log.Fatalf("[AiChat] Failed to parse credentials JSON: %v", err)
+	}
+
 	genaiClient, err = genai.NewClient(ctx, &genai.ClientConfig{
-		APIKey:  config.AIStudioAPIKey,
-		Backend: genai.BackendGeminiAPI,
+		Project:     config.VertexProjectID,
+		Location:    config.VertexLocation,
+		Backend:     genai.BackendVertexAI,
+		Credentials: creds,
 	})
 	if err != nil {
 		log.Fatalf("[AiChat] Failed to create GenAI client: %v", err)
 	}
-	log.Println("[AiChat] GenAI client initialized with function calling support")
+	log.Println("[AiChat] GenAI client initialized with Vertex AI backend using Base64 credentials")
 
 	for _, id := range config.AllowedChatIDs {
 		// Legacy: still honour env-provided IDs on startup
