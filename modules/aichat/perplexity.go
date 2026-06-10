@@ -57,7 +57,7 @@ func initPerplexity() {
 		pplxMu.Lock()
 		pplxJWT = dbJWT
 		pplxMu.Unlock()
-		log.Println("[Perplexity] Loaded JWT from DB")
+		log.Printf("[Perplexity] Loaded JWT from DB: %s", dbJWT)
 		return
 	}
 
@@ -68,7 +68,7 @@ func initPerplexity() {
 		return
 	}
 
-	log.Println("[Perplexity] Bootstrapping: refreshing env seed JWT...")
+	log.Printf("[Perplexity] Bootstrapping: refreshing env seed JWT: %s", seedJWT)
 	newJWT, err := refreshJWT(seedJWT)
 	if err != nil {
 		log.Printf("[Perplexity] Seed refresh failed: %v — using seed directly", err)
@@ -82,7 +82,7 @@ func initPerplexity() {
 	if err := storeJWTInDB(newJWT); err != nil {
 		log.Printf("[Perplexity] Failed to store JWT in DB: %v", err)
 	} else {
-		log.Println("[Perplexity] JWT bootstrapped and stored in DB")
+		log.Printf("[Perplexity] JWT bootstrapped and stored in DB: %s", newJWT)
 	}
 }
 
@@ -206,6 +206,7 @@ func perplexitySearch(query string) (*PerplexityResult, error) {
 	if jwt == "" {
 		return nil, fmt.Errorf("no Perplexity JWT available")
 	}
+	log.Printf("[Perplexity] Using JWT for search: %s", jwt)
 
 	body := map[string]any{
 		"query_str": query + "\n\n\n\nYOU MUST SEARCH WEB FOR THIS QUERY",
