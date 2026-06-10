@@ -103,7 +103,7 @@ func createTelegraphAccount() (TelegraphAccount, error) {
 	return result.Result, nil
 }
 
-func uploadToTelegraph(title, content string) (string, error) {
+func UploadToTelegraph(title, content string) (string, error) {
 	if config.TelegraphAccessToken == "" {
 		// Fallback attempt to ensure creation if missing at runtime
 		ensureTelegraphToken()

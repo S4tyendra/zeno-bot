@@ -75,7 +75,7 @@ var gptTools = []map[string]interface{}{
 
 
 func handleGPT(m *telegram.NewMessage) error {
-	if !filterAllowed(m) {
+	if !FilterAllowed(m) {
 		return nil
 	}
 	return processGPTRequest(m, m.Args())

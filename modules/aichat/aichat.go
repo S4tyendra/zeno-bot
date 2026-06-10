@@ -170,14 +170,14 @@ func Register(client *telegram.Client) {
 }
 
 func handleAskAI(m *telegram.NewMessage) error {
-	if !filterAllowed(m) {
+	if !FilterAllowed(m) {
 		return nil
 	}
 	return processAIRequest(m, m.Args())
 }
 
 func handleSearch(m *telegram.NewMessage) error {
-	if !filterAllowed(m) {
+	if !FilterAllowed(m) {
 		return nil
 	}
 	query := m.Args()
@@ -222,7 +222,7 @@ func handleSearch(m *telegram.NewMessage) error {
 }
 
 func handleMessage(m *telegram.NewMessage) error {
-	if !filterAllowed(m) {
+	if !FilterAllowed(m) {
 		return nil
 	}
 	text := m.Text()
@@ -436,11 +436,11 @@ func sendLargeResponse(m *telegram.NewMessage, placeholder *telegram.NewMessage,
 		log.Printf("[AiChat] Response length %d > 4000, uploading to Telegraph...", len(text))
 		title := fmt.Sprintf("Response to %s", getSenderName(m))
 
-		url, err := uploadToTelegraph(title, text)
+		url, err := UploadToTelegraph(title, text)
 		if err != nil {
 			// Retry once
 			log.Printf("[AiChat] Telegraph upload failed (%v), retrying...", err)
-			url, err = uploadToTelegraph(title, text)
+			url, err = UploadToTelegraph(title, text)
 		}
 
 		if err != nil {

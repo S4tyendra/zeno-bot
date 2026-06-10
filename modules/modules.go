@@ -5,6 +5,7 @@ import (
 
 	"zeno/modules/admin"
 	"zeno/modules/aichat"
+	"zeno/modules/code"
 	"zeno/modules/utility"
 )
 
@@ -12,4 +13,5 @@ func RegisterAll(client *telegram.Client) {
 	aichat.Register(client)
 	utility.Register(client)
 	admin.Register(client)
+	code.Register(client)
 }

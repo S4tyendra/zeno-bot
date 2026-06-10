@@ -341,7 +341,7 @@ func executeGetLatestData(args map[string]any) map[string]any {
 			}
 		}
 
-		url, err := uploadToTelegraph(fmt.Sprintf("Sources: %s", truncateString(query, 60)), sb.String())
+		url, err := UploadToTelegraph(fmt.Sprintf("Sources: %s", truncateString(query, 60)), sb.String())
 		if err != nil {
 			log.Printf("[Perplexity] Failed to upload sources to Telegraph: %v", err)
 		} else {

@@ -90,8 +90,8 @@ func deleteAllow(id int64) {
 	}
 }
 
-// filterAllowed returns true if the sender/chat is allowed to use AI.
-func filterAllowed(m interface {
+// FilterAllowed returns true if the sender/chat is allowed to use AI.
+func FilterAllowed(m interface {
 	ChatID() int64
 	SenderID() int64
 	IsPrivate() bool
