@@ -132,7 +132,7 @@ func Register(client *telegram.Client) {
 		log.Fatalf("[AiChat] Failed to decode base64 credentials: %v", err)
 	}
 
-	creds, err := credentials.NewCredentialsFromJSON(credentials.ServiceAccount, decodedCreds, nil)
+	creds, err := credentials.NewCredentialsFromJSON(credentials.ServiceAccount, decodedCreds, &credentials.DetectOptions{})
 	if err != nil {
 		log.Fatalf("[AiChat] Failed to parse credentials JSON: %v", err)
 	}
