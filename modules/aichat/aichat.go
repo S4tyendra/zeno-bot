@@ -122,6 +122,7 @@ type UploadedFile struct {
 	MIMEType      string             `bson:"mime_type"`
 	FileName      string             `bson:"file_name"`
 	UploadedAt    time.Time          `bson:"uploaded_at"`
+	Data          []byte             `bson:"data,omitempty"`
 }
 
 type SavedToolCall struct {
@@ -423,16 +424,29 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 		// Automatically process and upload files inside window context if not uploaded yet
 		var fileDoc UploadedFile
 		hasFile := false
+		isText := false
+		var textFileContent string
+
 		if msg.Media() != nil {
 			err = mongoDB.Collection("uploaded_files").FindOne(ctx, bson.M{"chat_id": chatID, "msg_id": msgID}).Decode(&fileDoc)
 			if err != nil {
+				log.Printf("[AiChat] File found in msg ID %d but not in DB. Downloading...", msgID)
 				upFile, err := handleFileUpload(ctx, &msg)
 				if err == nil && upFile != nil {
 					fileDoc = *upFile
 					hasFile = true
 				}
 			} else {
+				log.Printf("[AiChat] DB Cache Hit: Loaded file %s (%s, %d bytes) for msg ID %d", fileDoc.FileName, fileDoc.MIMEType, len(fileDoc.Data), msgID)
 				hasFile = true
+			}
+
+			if hasFile {
+				if isTextFile(fileDoc.FileName, fileDoc.MIMEType) {
+					isText = true
+					textFileContent = string(fileDoc.Data)
+					log.Printf("[AiChat] Detected text file: %s (%d chars) for msg ID %d", fileDoc.FileName, len(textFileContent), msgID)
+				}
 			}
 		}
 
@@ -453,14 +467,24 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 			if repliedToFileName != "" {
 				msgText = fmt.Sprintf("[Replied to file: %s] %s", repliedToFileName, msgText)
 			}
+			if isText {
+				msgText = fmt.Sprintf("\n--- File: %s ---\n%s\n---\n%s", fileDoc.FileName, textFileContent, msgText)
+				log.Printf("[AiChat] Appended text file %s inline to formatted prompt for msg ID %d", fileDoc.FileName, msgID)
+			}
 			formattedXML = formatXMLMessage(msgText, senderName, senderID, chatID, chatName, msgID, time.Unix(int64(msg.Date()), 0))
 		}
 
 		var parts []*genai.Part
 		parts = append(parts, &genai.Part{Text: formattedXML})
 
-		if !isBot && hasFile {
-			parts = append(parts, genai.NewPartFromURI(fileDoc.GoogleFileURI, fileDoc.MIMEType))
+		if !isBot && hasFile && !isText {
+			log.Printf("[AiChat] Attaching inline media part %s (%s, %d bytes) to Gemini context for msg ID %d", fileDoc.FileName, fileDoc.MIMEType, len(fileDoc.Data), msgID)
+			parts = append(parts, &genai.Part{
+				InlineData: &genai.Blob{
+					Data:     fileDoc.Data,
+					MIMEType: fileDoc.MIMEType,
+				},
+			})
 		}
 
 		role := genai.RoleUser
@@ -517,46 +541,37 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 }
 
 func handleFileUpload(ctx context.Context, m *telegram.NewMessage) (*UploadedFile, error) {
+	log.Printf("[AiChat] Downloading media from Telegram for msg ID %d...", m.ID)
 	mediaData, mimeType, fileName := downloadMedia(m)
 	if mediaData == nil {
 		return nil, fmt.Errorf("failed to download media or media is too large")
 	}
 
-	googleFile, err := uploadToGemini(ctx, mediaData, fileName, mimeType)
-	if err != nil {
-		return nil, fmt.Errorf("failed to upload to Gemini: %v", err)
-	}
-
 	upFile := UploadedFile{
-		ChatID:        m.ChatID(),
-		MsgID:         m.ID,
-		GoogleFileURI: googleFile.URI,
-		MIMEType:      googleFile.MIMEType,
-		FileName:      fileName,
-		UploadedAt:    time.Now(),
+		ChatID:     m.ChatID(),
+		MsgID:      m.ID,
+		MIMEType:   mimeType,
+		FileName:   fileName,
+		UploadedAt: time.Now(),
+		Data:       mediaData,
 	}
 
 	coll := mongoDB.Collection("uploaded_files")
-	_, err = coll.InsertOne(ctx, upFile)
+	_, err := coll.InsertOne(ctx, upFile)
 	if err != nil {
 		insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_, err = coll.InsertOne(insertCtx, upFile)
 		insertCancel()
 		if err != nil {
 			log.Printf("[AiChat] Failed to save file mapping to DB after retry: %v", err)
+		} else {
+			log.Printf("[AiChat] Downloaded & Cached: Stored file %s (%s, %d bytes) to DB for msg ID %d (after retry)", fileName, mimeType, len(mediaData), m.ID)
 		}
+	} else {
+		log.Printf("[AiChat] Downloaded & Cached: Stored file %s (%s, %d bytes) to DB for msg ID %d", fileName, mimeType, len(mediaData), m.ID)
 	}
 
 	return &upFile, nil
-}
-
-func uploadToGemini(ctx context.Context, data []byte, fileName string, mimeType string) (*genai.File, error) {
-	r := strings.NewReader(string(data))
-	configUpload := &genai.UploadFileConfig{
-		MIMEType:    mimeType,
-		DisplayName: fileName,
-	}
-	return genaiClient.Files.Upload(ctx, r, configUpload)
 }
 
 func getMemoriesForUsers(ctx context.Context, userIDs []int64) (map[int64][]Memory, error) {

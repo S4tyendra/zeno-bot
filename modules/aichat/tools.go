@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -606,9 +605,6 @@ func executeFileActions(args map[string]any) map[string]any {
 		return map[string]any{"success": false, "error": "access denied: path outside allowed directories"}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	switch action {
 	case "read":
 		data, err := os.ReadFile(cleanPath)
@@ -655,24 +651,7 @@ func executeFileActions(args map[string]any) map[string]any {
 		return map[string]any{"success": true, "message": "file edited successfully"}
 
 	case "upload":
-		data, err := os.ReadFile(cleanPath)
-		if err != nil {
-			return map[string]any{"success": false, "error": err.Error()}
-		}
-		mimeType := http.DetectContentType(data)
-		fileName := filepath.Base(cleanPath)
-
-		googleFile, err := uploadToGemini(ctx, data, fileName, mimeType)
-		if err != nil {
-			return map[string]any{"success": false, "error": fmt.Sprintf("Gemini upload failed: %v", err)}
-		}
-
-		return map[string]any{
-			"success":         true,
-			"google_file_uri": googleFile.URI,
-			"mime_type":       googleFile.MIMEType,
-			"file_name":       fileName,
-		}
+		return map[string]any{"success": false, "error": "Google Gemini Files API upload is not supported under the current Vertex AI backend. Use local/inline file context instead."}
 
 	default:
 		return map[string]any{"success": false, "error": "unknown file action"}
