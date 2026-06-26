@@ -19,7 +19,7 @@ import (
 	"google.golang.org/genai"
 )
 
-var gptTools = []map[string]interface{}{
+var gptTools = []map[string]any{
 	{
 		"type":        "function",
 		"name":        "create_image",
@@ -60,8 +60,8 @@ var gptTools = []map[string]interface{}{
 		},
 	},
 	{
-		"type": "function",
-		"name": "get_latest_data",
+		"type":        "function",
+		"name":        "get_latest_data",
 		"description": "Search the web for real-time information. Returns sources and details.",
 		"parameters": map[string]interface{}{
 			"type": "object",
@@ -72,7 +72,6 @@ var gptTools = []map[string]interface{}{
 		},
 	},
 }
-
 
 func handleGPT(m *telegram.NewMessage) error {
 	if !FilterAllowed(m) {
@@ -90,7 +89,7 @@ func processGPTRequest(m *telegram.NewMessage, query string) error {
 		historyLimit = 30
 	}
 
-	chatHistory := fetchChatHistoryExcluding(chatID, m.ID, replyToMsgID, historyLimit)
+	chatHistory := fetchTelegramHistory(chatID, m.ID, replyToMsgID, historyLimit)
 	var contextBuilder strings.Builder
 
 	// Enforce SYSTEM_PROMPT directly in the context block since the unofficial API
@@ -101,9 +100,9 @@ func processGPTRequest(m *telegram.NewMessage, query string) error {
 
 	if len(chatHistory) > 0 {
 		for _, msg := range chatHistory {
-			contextBuilder.WriteString(msg.Sender)
+			contextBuilder.WriteString(getSenderFromMessage(&msg))
 			contextBuilder.WriteString(": ")
-			contextBuilder.WriteString(strings.ReplaceAll(msg.Text, "\n", "\\n"))
+			contextBuilder.WriteString(strings.ReplaceAll(msg.Text(), "\n", "\\n"))
 			contextBuilder.WriteString("\n")
 		}
 		contextBuilder.WriteString("----\n")
@@ -258,7 +257,6 @@ func pdfToImages(pdfData []byte, maxPages int) ([][]byte, error) {
 	}
 	return result, nil
 }
-
 
 type pendingToolCall struct {
 	CallID    string

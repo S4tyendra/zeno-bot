@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/amarnathcjd/gogram/telegram"
 	"google.golang.org/genai"
@@ -21,6 +22,41 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+func truncateTerminalOutput(output string) string {
+	if len(output) <= 4000 {
+		return output
+	}
+	firstPart := output[:2000]
+	lastPart := output[len(output)-2000:]
+	return firstPart + "\n\n... (truncated output) ...\n\n" + lastPart
+}
+
+func ensureGroupPrefix(chatID int64) string {
+	idStr := fmt.Sprintf("%d", chatID)
+	if chatID < 0 {
+		if !strings.HasPrefix(idStr, "-100") {
+			idStr = "-100" + strings.TrimPrefix(idStr, "-")
+		}
+	}
+	return idStr
+}
+
+func formatXMLMessage(msgText string, senderName string, userID int64, chatID int64, chatName string, msgID int32, timestamp time.Time) string {
+	if len(senderName) > 30 {
+		senderName = senderName[:30]
+	}
+	if len(chatName) > 30 {
+		chatName = chatName[:30]
+	}
+	loc := time.FixedZone("IST", 5*3600+1800)
+	timeIST := timestamp.In(loc).Format("2006-01-02 15:04:05")
+
+	formattedChatIDStr := ensureGroupPrefix(chatID)
+
+	return fmt.Sprintf("<message user=%q userid=%q chatid=%q chatName=%q timeIST=%q messageid=%d>%s</message>",
+		senderName, fmt.Sprintf("%d", userID), formattedChatIDStr, chatName, timeIST, msgID, msgText)
 }
 
 func getSenderName(m *telegram.NewMessage) string {
@@ -67,7 +103,7 @@ func getSenderFromMessage(msg *telegram.NewMessage) string {
 	return "Unknown"
 }
 
-func fetchChatHistoryExcluding(chatID int64, currentMsgID int32, excludeReplyID int32, limit int) []ChatMessage {
+func fetchTelegramHistory(chatID int64, currentMsgID int32, excludeReplyID int32, limit int) []telegram.NewMessage {
 	if botClient == nil {
 		return nil
 	}
@@ -92,28 +128,26 @@ func fetchChatHistoryExcluding(chatID int64, currentMsgID int32, excludeReplyID 
 		return nil
 	}
 
-	var result []ChatMessage
+	var result []telegram.NewMessage
 	for _, msg := range messages {
 		if msg.ID == currentMsgID || (excludeReplyID != 0 && msg.ID == excludeReplyID) {
 			continue
 		}
 
 		text := msg.Text()
-		if text == "" || strings.HasPrefix(text, "/") {
+		if text == "" && msg.Media() == nil {
+			continue
+		}
+		if strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "/askai") && !strings.HasPrefix(text, "/gpt") {
 			continue
 		}
 
-		result = append(result, ChatMessage{
-			Sender: getSenderFromMessage(&msg),
-			Text:   text,
-		})
-
+		result = append(result, msg)
 		if len(result) >= limit {
 			break
 		}
 	}
 
-	// Reverse for chronological order
 	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
 		result[i], result[j] = result[j], result[i]
 	}
@@ -147,8 +181,6 @@ func getMessageWithMedia(chatID int64, msgID int32) (*ChatMessage, []*genai.Part
 				})
 				text = fmt.Sprintf("[Image File: %s]\n%s", fileName, text)
 			} else if mimeType == "application/pdf" || strings.HasSuffix(strings.ToLower(fileName), ".pdf") {
-				// Return raw PDF blob — callers decide how to process it
-				// (Gemini: pdfToImages inline; GPT: input_file base64)
 				mediaParts = append(mediaParts, &genai.Part{
 					InlineData: &genai.Blob{
 						Data:     mediaData,
@@ -252,3 +284,5 @@ func getRepliedMessageSenderID(chatID int64, msgID int32) int64 {
 
 	return 0
 }
+
+

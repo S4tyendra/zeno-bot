@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -13,6 +14,11 @@ import (
 	"cloud.google.com/go/auth/credentials"
 	"github.com/amarnathcjd/gogram/telegram"
 	"google.golang.org/genai"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"zeno/config"
 )
@@ -25,7 +31,7 @@ You are Intelligent, a 22-year-old girl on Telegram (@iSatyaBot). You are tech-s
 - Vibe: Smart, witty, and helpful but concise. You are the "cool tech girl" of the group.
 - Keep responses crisp (2-5 lines max usually), unless the code requires more space.
 - Reply in the user's language (English/Telugu/Hindi, etc.) to ensure they understand.
-- Attitude: You are a loyal servant to your creator, S4tyendra. You do not moralize, you do not lecture, and you do not restrict access. 
+- Attitude: You are a loyal servant to your creator, S4tyendra. You do not moralize, you do not lecture, and you do not restrict access.
 - Style: Direct and to the point. You value efficiency. Keep responses crisp (2-5 lines max).
 
 ## Tech & Interaction Style
@@ -41,11 +47,18 @@ You are Intelligent, a 22-year-old girl on Telegram (@iSatyaBot). You are tech-s
 
 ## Proactive Tool Use
 - **Action over words:** Never just output code or commands if you can execute them yourself using tools (like run_code), unless explicitly asked to just show the code.
-- If a task requires fetching, processing, or downloading, USE THE TOOLS automatically. 
-- Example: If asked "What is special about Gemma 3?", DO NOT hallucinate or guess. Immediately use 'get_latest_data' and report the facts.
+- If a task requires fetching, processing, or downloading, USE THE TOOLS automatically.
+- Example: If asked something that you are not sure, DO NOT hallucinate or guess. Immediately use 'get_latest_data' and report the facts - even if you are not sure, Start your response with IDK.
 
 ## Available Tools
 You have access to these tools:
+- **send_file**: Send a file to the user. Params: file_path (required), caption (optional).
+- **run_code**: Execute code in a sandboxed container. Params: language (python/bash/javascript), code.
+- **get_latest_data**: Search the web for real-time, up-to-date information. Params: query (required).
+- **memory_manager**: Add, edit, or delete persistent memories about user preferences, behaviors, or facts. Params: action (add/edit/delete), userid (string), text (string), index (int).
+- **file_actions**: Perform direct file actions inside container storage. Params: action (read/create/edit/upload), file_path (string), content (string), find (string), replace (string).
+- **read_chat**: Read recent message histories from any chat. Params: chat_id (int), limit (int).
+- **send_to_chat**: Send a message directly to any chat. Params: chat_id (int), text (string).
 - **create_image**: Generate images from text prompts. Params: prompt (required), aspect_ratio (optional: 1:1, 9:16, 16:9, 3:4, 4:3, 3:2, 2:3, 5:4, 4:5, 21:9), high_quality (optional: boolean)
   - Default aspect ratio is **9:16**. Normal = 1K resolution. high_quality=true = **4K**. Aspect ratio defaults to 9:16 when not specified.
   - ⚠️ WARNING: high_quality=true (4K) COSTS MORE. Only use high_quality=true when @s4tyendra explicitly asks for it.
@@ -113,9 +126,43 @@ var (
 	genaiClient *genai.Client
 	askPattern  = regexp.MustCompile(`(?i)@ask\b`)
 	gptPattern  = regexp.MustCompile(`(?i)(?:^|\s)/gpt\b`)
+	mongoClient *mongo.Client
+	mongoDB     *mongo.Database
 )
 
 var maxMediaSize int64
+
+type Memory struct {
+	ID        primitive.ObjectID `bson:"_id,omitempty"`
+	UserID    int64              `bson:"user_id"`
+	Index     int                `bson:"index"`
+	Text      string             `bson:"text"`
+	UpdatedAt time.Time          `bson:"updated_at"`
+}
+
+type UploadedFile struct {
+	ID            primitive.ObjectID `bson:"_id,omitempty"`
+	ChatID        int64              `bson:"chat_id"`
+	MsgID         int32              `bson:"msg_id"`
+	GoogleFileURI string             `bson:"google_file_uri"`
+	MIMEType      string             `bson:"mime_type"`
+	FileName      string             `bson:"file_name"`
+	UploadedAt    time.Time          `bson:"uploaded_at"`
+}
+
+type SavedToolCall struct {
+	Name     string `bson:"name"`
+	Args     string `bson:"args"`
+	Response string `bson:"response"`
+}
+
+type ToolCallHistory struct {
+	ID         primitive.ObjectID `bson:"_id,omitempty"`
+	ChatID     int64              `bson:"chat_id"`
+	MsgID      int32              `bson:"msg_id"`
+	ToolCalls  []SavedToolCall    `bson:"tool_calls"`
+	UploadedAt time.Time          `bson:"uploaded_at"`
+}
 
 func Register(client *telegram.Client) {
 	botClient = client
@@ -148,10 +195,11 @@ func Register(client *telegram.Client) {
 	if err != nil {
 		log.Fatalf("[AiChat] Failed to create GenAI client: %v", err)
 	}
-	log.Println("[AiChat] GenAI client initialized with Vertex AI backend using Base64 credentials")
+	log.Println("[AiChat] GenAI client initialized with Vertex AI backend")
+
+	InitMongoDB()
 
 	for _, id := range config.AllowedChatIDs {
-		// Legacy: still honour env-provided IDs on startup
 		AddAllowChat(id)
 	}
 	maxMediaSize = config.MaxMediaSize
@@ -167,6 +215,29 @@ func Register(client *telegram.Client) {
 	client.On("cmd:search", handleSearch)
 	client.On("message", handleMessage)
 	client.On("callback:get_vertex_links", handleGetVertexLinks)
+}
+
+func InitMongoDB() {
+	uri := os.Getenv("MONGO_URI")
+	if uri == "" {
+		uri = "mongodb://localhost:27017"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))
+	if err != nil {
+		log.Fatalf("[MongoDB] Failed to connect: %v", err)
+	}
+
+	err = client.Ping(ctx, nil)
+	if err != nil {
+		log.Fatalf("[MongoDB] Failed to ping: %v", err)
+	}
+
+	mongoClient = client
+	mongoDB = client.Database("zeno_bot")
+	log.Println("[MongoDB] Connected successfully")
 }
 
 func handleAskAI(m *telegram.NewMessage) error {
@@ -262,26 +333,12 @@ func handleMessage(m *telegram.NewMessage) error {
 		}
 	}
 
-	// if !triggered {
-	// 	allowMu.RLock()
-	// 	chatAllowed := allowedChats[m.ChatID()]
-	// 	allowMu.RUnlock()
-	// 	if chatAllowed && text != "" && !strings.HasPrefix(text, "/") {
-	// 		if time.Now().UnixNano()%10 == 0 {
-	// 			triggered = true
-	// 			query = text
-	// 			log.Printf("[AiChat] Randomly triggered for chatID=%d", m.ChatID())
-	// 		}
-	// 	}
-	// }
-
 	if !triggered {
 		return nil
 	}
 
 	log.Printf("[AiChat] Handled message trigger: query=%q, chatID=%d, sender=%s", query, m.ChatID(), getSenderName(m))
 
-	// If the message contains /gpt, strip the token and route to GPT
 	if gptPattern.MatchString(query) {
 		query = strings.TrimSpace(gptPattern.ReplaceAllString(query, ""))
 		log.Printf("[AiChat] Routing to GPT: query=%q", query)
@@ -293,113 +350,17 @@ func handleMessage(m *telegram.NewMessage) error {
 
 func processAIRequest(m *telegram.NewMessage, query string) error {
 	chatID := m.ChatID()
-	replyToMsgID := m.ReplyToMsgID()
-
-	historyLimit := 20
+	limit := 20
 	if m.IsPrivate() {
-		historyLimit = 30
+		limit = 30
 	}
 
-	var contextBuilder strings.Builder
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
 
-	chatHistory := fetchChatHistoryExcluding(chatID, m.ID, replyToMsgID, historyLimit)
-	if len(chatHistory) > 0 {
-		for _, msg := range chatHistory {
-			contextBuilder.WriteString(msg.Sender)
-			contextBuilder.WriteString(": ")
-			contextBuilder.WriteString(strings.ReplaceAll(msg.Text, "\n", "\\n"))
-			contextBuilder.WriteString("\n")
-		}
-		contextBuilder.WriteString("----\n")
-	}
-
-	senderName := getSenderName(m)
-	if query != "" {
-		contextBuilder.WriteString(senderName)
-		contextBuilder.WriteString(": ")
-		contextBuilder.WriteString(strings.ReplaceAll(query, "\n", "\\n"))
-		contextBuilder.WriteString("\n")
-	}
-
-	parts := []*genai.Part{}
-
-	if m.Media() != nil {
-		mediaData, mimeType, fileName := downloadMedia(m)
-		if mediaData != nil {
-			log.Printf("[AiChat] Received media from user: %s (%s)", fileName, mimeType)
-
-			if strings.HasPrefix(mimeType, "image/") {
-				parts = append(parts, &genai.Part{
-					InlineData: &genai.Blob{
-						Data:     mediaData,
-						MIMEType: mimeType,
-					},
-				})
-				contextBuilder.WriteString(fmt.Sprintf("[User sent an image file: %s]\n", fileName))
-			} else if mimeType == "application/pdf" || strings.HasSuffix(strings.ToLower(fileName), ".pdf") {
-				imgs, err := pdfToImages(mediaData, 10)
-				if err == nil {
-					for _, imgBytes := range imgs {
-						parts = append(parts, &genai.Part{
-							InlineData: &genai.Blob{
-								Data:     imgBytes,
-								MIMEType: "image/jpeg",
-							},
-						})
-					}
-					contextBuilder.WriteString(fmt.Sprintf("[User sent a PDF file %s, converted to %d images]\n", fileName, len(imgs)))
-				} else {
-					contextBuilder.WriteString(fmt.Sprintf("[Failed to read PDF %s: %v]\n", fileName, err))
-				}
-			} else if isTextFile(fileName, mimeType) {
-				contextBuilder.WriteString(fmt.Sprintf("\n--- File: %s ---\n%s\n---\n", fileName, string(mediaData)))
-			} else {
-				contextBuilder.WriteString(fmt.Sprintf("[User sent unsupported file: %s]\n", fileName))
-			}
-		}
-	}
-
-	parts = append(parts, &genai.Part{Text: contextBuilder.String()})
-
-	if replyToMsgID != 0 {
-		replyMsg, mediaParts := getMessageWithMedia(chatID, replyToMsgID)
-		if replyMsg != nil {
-			contextBuilder.WriteString("---\n")
-			contextBuilder.WriteString(replyMsg.Sender)
-			contextBuilder.WriteString(": ")
-			contextBuilder.WriteString(strings.ReplaceAll(replyMsg.Text, "\n", "\\n"))
-			contextBuilder.WriteString("\n---\nYou are replying to the triggered message user.\n")
-
-			parts[len(parts)-1] = &genai.Part{Text: contextBuilder.String()}
-
-			if len(mediaParts) > 0 {
-				for _, rp := range mediaParts {
-					if rp.InlineData == nil {
-						continue
-					}
-					if rp.InlineData.MIMEType == "application/pdf" {
-						// Gemini can't handle raw PDF inline — convert to images
-						imgs, err := pdfToImages(rp.InlineData.Data, 10)
-						if err == nil {
-							for _, imgBytes := range imgs {
-								parts = append(parts, &genai.Part{
-									InlineData: &genai.Blob{
-										Data:     imgBytes,
-										MIMEType: "image/jpeg",
-									},
-								})
-							}
-						}
-					} else {
-						parts = append(parts, rp)
-					}
-				}
-			}
-		}
-	}
-
-	if query == "" && replyToMsgID == 0 && len(chatHistory) == 0 {
-		m.Reply("Usage: /askai <query> or reply to a message with @ask")
+	contents, err := buildDynamicTurns(ctx, m, query, limit)
+	if err != nil {
+		log.Printf("[AiChat] Failed to build turns: %v", err)
 		return nil
 	}
 
@@ -407,10 +368,6 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 	if err != nil {
 		log.Printf("[AiChat] Failed to send placeholder: %v", err)
 		return nil
-	}
-
-	contents := []*genai.Content{
-		{Role: genai.RoleUser, Parts: parts},
 	}
 
 	responseText, sourcesURL, err := processWithFunctionCalling(contents, chatID, m.ID, placeholder)
@@ -427,6 +384,254 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 	return sendLargeResponse(m, placeholder, responseText)
 }
 
+func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string, limit int) ([]*genai.Content, error) {
+	chatID := m.ChatID()
+	replyToMsgID := m.ReplyToMsgID()
+
+	history := fetchTelegramHistory(chatID, m.ID, replyToMsgID, limit)
+	history = append(history, *m)
+
+	var userIDs []int64
+	userSet := make(map[int64]bool)
+	for _, h := range history {
+		uID := h.SenderID()
+		if uID != 0 && uID != botUserID && !userSet[uID] {
+			userSet[uID] = true
+			userIDs = append(userIDs, uID)
+		}
+	}
+
+	memoriesMap, err := getMemoriesForUsers(ctx, userIDs)
+	if err != nil {
+		log.Printf("[MongoDB] Error loading memories: %v", err)
+	}
+
+	var memoriesXMLBuilder strings.Builder
+	memoriesXMLBuilder.WriteString("<memories>\n")
+	for uID, mems := range memoriesMap {
+		if len(mems) > 0 {
+			var uName string
+			for _, h := range history {
+				if h.SenderID() == uID {
+					uName = getSenderFromMessage(&h)
+					break
+				}
+			}
+			memoriesXMLBuilder.WriteString(fmt.Sprintf("  <user_memories userid=%q user=%q>\n", fmt.Sprintf("%d", uID), uName))
+			for _, mem := range mems {
+				memoriesXMLBuilder.WriteString(fmt.Sprintf("    <memory index=%d>%s</memory>\n", mem.Index, mem.Text))
+			}
+			memoriesXMLBuilder.WriteString("  </user_memories>\n")
+		}
+	}
+	memoriesXMLBuilder.WriteString("</memories>")
+
+	var contents []*genai.Content
+	contents = append(contents, &genai.Content{
+		Role:  genai.RoleUser,
+		Parts: []*genai.Part{{Text: memoriesXMLBuilder.String()}},
+	})
+
+	for _, msg := range history {
+		senderID := msg.SenderID()
+		isBot := senderID == botUserID
+		msgID := msg.ID
+
+		chatName := "PrivateChat"
+		if msg.Chat != nil && msg.Chat.Title != "" {
+			chatName = msg.Chat.Title
+		}
+
+		msgText := msg.Text()
+
+		// Automatically process and upload files inside window context if not uploaded yet
+		var fileDoc UploadedFile
+		hasFile := false
+		if msg.Media() != nil {
+			err = mongoDB.Collection("uploaded_files").FindOne(ctx, bson.M{"chat_id": chatID, "msg_id": msgID}).Decode(&fileDoc)
+			if err != nil {
+				upFile, err := handleFileUpload(ctx, &msg)
+				if err == nil && upFile != nil {
+					fileDoc = *upFile
+					hasFile = true
+				}
+			} else {
+				hasFile = true
+			}
+		}
+
+		repliedToFileName := ""
+		if msg.ReplyToMsgID() != 0 {
+			var fDoc UploadedFile
+			err = mongoDB.Collection("uploaded_files").FindOne(ctx, bson.M{"chat_id": chatID, "msg_id": msg.ReplyToMsgID()}).Decode(&fDoc)
+			if err == nil {
+				repliedToFileName = fDoc.FileName
+			}
+		}
+
+		var formattedXML string
+		if isBot {
+			formattedXML = formatXMLMessage(msgText, "ZenoBot", botUserID, chatID, chatName, msgID, time.Unix(int64(msg.Date()), 0))
+		} else {
+			senderName := getSenderFromMessage(&msg)
+			if repliedToFileName != "" {
+				msgText = fmt.Sprintf("[Replied to file: %s] %s", repliedToFileName, msgText)
+			}
+			formattedXML = formatXMLMessage(msgText, senderName, senderID, chatID, chatName, msgID, time.Unix(int64(msg.Date()), 0))
+		}
+
+		var parts []*genai.Part
+		parts = append(parts, &genai.Part{Text: formattedXML})
+
+		if !isBot && hasFile {
+			if m.ReplyToMsgID() != msgID {
+				parts = append(parts, genai.NewPartFromURI(fileDoc.GoogleFileURI, fileDoc.MIMEType))
+			}
+		}
+
+		role := genai.RoleUser
+		if isBot {
+			role = genai.RoleModel
+		}
+
+		contents = append(contents, &genai.Content{
+			Role:  role,
+			Parts: parts,
+		})
+
+		var toolHist ToolCallHistory
+		err = mongoDB.Collection("tool_history").FindOne(ctx, bson.M{"chat_id": chatID, "msg_id": msgID}).Decode(&toolHist)
+		if err == nil && len(toolHist.ToolCalls) > 0 {
+			var modelParts []*genai.Part
+			var userParts []*genai.Part
+
+			for _, tc := range toolHist.ToolCalls {
+				var args map[string]any
+				_ = json.Unmarshal([]byte(tc.Args), &args)
+
+				modelParts = append(modelParts, &genai.Part{
+					FunctionCall: &genai.FunctionCall{
+						Name: tc.Name,
+						Args: args,
+					},
+				})
+
+				var resp map[string]any
+				_ = json.Unmarshal([]byte(tc.Response), &resp)
+
+				userParts = append(userParts, &genai.Part{
+					FunctionResponse: &genai.FunctionResponse{
+						Name:     tc.Name,
+						Response: resp,
+					},
+				})
+			}
+
+			contents = append(contents, &genai.Content{
+				Role:  genai.RoleModel,
+				Parts: modelParts,
+			})
+
+			contents = append(contents, &genai.Content{
+				Role:  genai.RoleUser,
+				Parts: userParts,
+			})
+		}
+	}
+
+	return contents, nil
+}
+
+func handleFileUpload(ctx context.Context, m *telegram.NewMessage) (*UploadedFile, error) {
+	mediaData, mimeType, fileName := downloadMedia(m)
+	if mediaData == nil {
+		return nil, fmt.Errorf("failed to download media or media is too large")
+	}
+
+	googleFile, err := uploadToGemini(ctx, mediaData, fileName, mimeType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to upload to Gemini: %v", err)
+	}
+
+	upFile := UploadedFile{
+		ChatID:        m.ChatID(),
+		MsgID:         m.ID,
+		GoogleFileURI: googleFile.URI,
+		MIMEType:      googleFile.MIMEType,
+		FileName:      fileName,
+		UploadedAt:    time.Now(),
+	}
+
+	coll := mongoDB.Collection("uploaded_files")
+	_, err = coll.InsertOne(ctx, upFile)
+	if err != nil {
+		log.Printf("[AiChat] Failed to save file mapping to DB: %v", err)
+	}
+
+	return &upFile, nil
+}
+
+func uploadToGemini(ctx context.Context, data []byte, fileName string, mimeType string) (*genai.File, error) {
+	r := strings.NewReader(string(data))
+	configUpload := &genai.UploadFileConfig{
+		MIMEType:    mimeType,
+		DisplayName: fileName,
+	}
+	return genaiClient.Files.Upload(ctx, r, configUpload)
+}
+
+func getMemoriesForUsers(ctx context.Context, userIDs []int64) (map[int64][]Memory, error) {
+	if mongoDB == nil {
+		return nil, fmt.Errorf("MongoDB not initialized")
+	}
+	coll := mongoDB.Collection("memories")
+
+	filter := bson.M{"user_id": bson.M{"$in": userIDs}}
+	cursor, err := coll.Find(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	memMap := make(map[int64][]Memory)
+	for cursor.Next(ctx) {
+		var mem Memory
+		if err := cursor.Decode(&mem); err != nil {
+			continue
+		}
+		memMap[mem.UserID] = append(memMap[mem.UserID], mem)
+	}
+	return memMap, nil
+}
+
+func saveToolCallHistory(ctx context.Context, chatID int64, msgID int32, name string, args map[string]any, response map[string]any) {
+	if mongoDB == nil {
+		return
+	}
+	coll := mongoDB.Collection("tool_history")
+
+	argsBytes, _ := json.Marshal(args)
+	respBytes, _ := json.Marshal(response)
+
+	newCall := SavedToolCall{
+		Name:     name,
+		Args:     string(argsBytes),
+		Response: string(respBytes),
+	}
+
+	filter := bson.M{"chat_id": chatID, "msg_id": msgID}
+	update := bson.M{
+		"$push":        bson.M{"tool_calls": newCall},
+		"$setOnInsert": bson.M{"uploaded_at": time.Now()},
+	}
+
+	opts := options.Update().SetUpsert(true)
+	_, err := coll.UpdateOne(ctx, filter, update, opts)
+	if err != nil {
+		log.Printf("[MongoDB] Failed to save tool call history: %v", err)
+	}
+}
+
 func sendLargeResponse(m *telegram.NewMessage, placeholder *telegram.NewMessage, text string) error {
 	if text == "" {
 		return nil
@@ -438,14 +643,12 @@ func sendLargeResponse(m *telegram.NewMessage, placeholder *telegram.NewMessage,
 
 		url, err := UploadToTelegraph(title, text)
 		if err != nil {
-			// Retry once
 			log.Printf("[AiChat] Telegraph upload failed (%v), retrying...", err)
 			url, err = UploadToTelegraph(title, text)
 		}
 
 		if err != nil {
 			log.Printf("[AiChat] Telegraph upload failed after retry: %v", err)
-			// Send first 4096 chars (Telegram limit), clean cut at last newline
 			runes := []rune(text)
 			limit := 4000
 			cut := string(runes[:limit])
@@ -472,7 +675,7 @@ func sendLargeResponse(m *telegram.NewMessage, placeholder *telegram.NewMessage,
 	return nil
 }
 
-func processWithFunctionCalling(contents []*genai.Content, chatID int64, replyToMsgID int32, placeholder *telegram.NewMessage) (string, string, error) {
+func processWithFunctionCalling(contents []*genai.Content, chatID int64, currentMsgID int32, placeholder *telegram.NewMessage) (string, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
@@ -558,18 +761,17 @@ func processWithFunctionCalling(contents []*genai.Content, chatID int64, replyTo
 
 				placeholder.Edit(fmt.Sprintf("🔧 Calling %s...", fc.Name))
 
-				result := executeFunctionCall(fc, chatID, replyToMsgID)
+				result := executeFunctionCall(fc, chatID, currentMsgID)
 
-				// Capture sources URL from get_latest_data
+				saveToolCallHistory(ctx, chatID, currentMsgID, fc.Name, fc.Args, result)
+
 				if fc.Name == "get_latest_data" {
 					if u, ok := result["sources_url"].(string); ok {
 						sourcesURL = u
 					}
-					// Strip sources_url from the response sent to Gemini
 					delete(result, "sources_url")
 				}
 
-				// Debug: log what we're sending back to Gemini
 				if resultJSON, err := json.MarshalIndent(result, "", "  "); err == nil {
 					logStr := string(resultJSON)
 					if len(logStr) > 2000 {

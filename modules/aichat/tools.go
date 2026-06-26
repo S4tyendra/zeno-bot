@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,9 @@ import (
 
 	"github.com/amarnathcjd/gogram/telegram"
 	"google.golang.org/genai"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"zeno/config"
 )
@@ -55,6 +59,10 @@ func init() {
 			"file_path": {
 				"type": "string",
 				"description": "Path to the file to send"
+			},
+			"caption": {
+				"type": "string",
+				"description": "Optional custom caption to send with the file. If not provided, a default caption is used."
 			}
 		},
 		"required": ["file_path"]
@@ -71,7 +79,7 @@ func init() {
 			},
 			"code": {
 				"type": "string",
-				"description": "The code to execute. For bash, can be a command like 'excol /generated/img.png'"
+				"description": "The code to execute."
 			}
 		},
 		"required": ["language", "code"]
@@ -89,6 +97,92 @@ func init() {
 		"required": ["query"]
 	}`), &getLatestDataParams)
 
+	var memoryManagerParams genai.Schema
+	json.Unmarshal([]byte(`{
+		"type": "object",
+		"properties": {
+			"action": {
+				"type": "string",
+				"enum": ["add", "edit", "delete"],
+				"description": "Action to perform on memory"
+			},
+			"userid": {
+				"type": "string",
+				"description": "User ID to manage memories for"
+			},
+			"text": {
+				"type": "string",
+				"description": "The memory text content (required for add/edit)"
+			},
+			"index": {
+				"type": "integer",
+				"description": "The memory index 1..100 (required for edit/delete)"
+			}
+		},
+		"required": ["action", "userid"]
+	}`), &memoryManagerParams)
+
+	var fileActionsParams genai.Schema
+	json.Unmarshal([]byte(`{
+		"type": "object",
+		"properties": {
+			"action": {
+				"type": "string",
+				"enum": ["read", "create", "edit", "upload"],
+				"description": "Action to perform: read, create (overwrite/new), edit (find-replace or rewrite), upload (to Gemini Files API)"
+			},
+			"file_path": {
+				"type": "string",
+				"description": "Absolute path to the file inside workspace or generated spaces"
+			},
+			"content": {
+				"type": "string",
+				"description": "Text content to write (required for create and complete rewrite edit)"
+			},
+			"find": {
+				"type": "string",
+				"description": "Text to find in file (optional find-replace edit)"
+			},
+			"replace": {
+				"type": "string",
+				"description": "Text to replace with (optional find-replace edit)"
+			}
+		},
+		"required": ["action", "file_path"]
+	}`), &fileActionsParams)
+
+	var readChatParams genai.Schema
+	json.Unmarshal([]byte(`{
+		"type": "object",
+		"properties": {
+			"chat_id": {
+				"type": "integer",
+				"description": "Telegram Chat ID to read from"
+			},
+			"limit": {
+				"type": "integer",
+				"description": "Number of messages to retrieve (max 50, default 10)"
+			}
+		},
+		"required": ["chat_id"]
+	}`), &readChatParams)
+
+	var sendToChatParams genai.Schema
+	json.Unmarshal([]byte(`{
+		"type": "object",
+		"properties": {
+			"chat_id": {
+				"type": "integer",
+				"description": "Telegram Chat ID to send to"
+			},
+			"text": {
+				"type": "string",
+				"description": "The message text to send"
+			}
+		},
+		"required": ["chat_id", "text"]
+	}`), &sendToChatParams)
+
 	aiTools = []*genai.Tool{
 		{
 			FunctionDeclarations: []*genai.FunctionDeclaration{
@@ -99,18 +193,38 @@ func init() {
 				},
 				{
 					Name:        "send_file",
-					Description: "Send a file to the user in the chat. Use after generating an image.",
+					Description: "Send a file to the user in the chat with optional custom caption support.",
 					Parameters:  &sendFileParams,
 				},
 				{
 					Name:        "run_code",
-					Description: "Execute code in a sandboxed container. Has access to /generated (images) and /workspace. Available: python, bash, javascript (bun).",
+					Description: "Execute code in a sandboxed container. Has access to /generated (images) and /workspace. Available: python, bash, javascript (bun). Output is truncated safely.",
 					Parameters:  &runCodeParams,
 				},
 				{
 					Name:        "get_latest_data",
 					Description: "Search the web for real-time, up-to-date information. Use when asked about current events, news, recent happenings, live scores, weather, or anything requiring fresh data. Returns answer with cited sources.",
 					Parameters:  &getLatestDataParams,
+				},
+				{
+					Name:        "memory_manager",
+					Description: "Add, edit, or delete persistent memories about user preferences, behaviors, or facts.",
+					Parameters:  &memoryManagerParams,
+				},
+				{
+					Name:        "file_actions",
+					Description: "Perform absolute file storage tasks like read, create, edit, or upload into the Gemini Files API space.",
+					Parameters:  &fileActionsParams,
+				},
+				{
+					Name:        "read_chat",
+					Description: "Retrieve recent chat message history from any accessible Telegram group, channel, or direct chat.",
+					Parameters:  &readChatParams,
+				},
+				{
+					Name:        "send_to_chat",
+					Description: "Directly dispatch a text message to any accessible Telegram chat by ID.",
+					Parameters:  &sendToChatParams,
 				},
 			},
 		},
@@ -129,6 +243,14 @@ func executeFunctionCall(fc *genai.FunctionCall, chatID int64, replyToMsgID int3
 		return executeRunCode(fc.Args)
 	case "get_latest_data":
 		return executeGetLatestData(fc.Args)
+	case "memory_manager":
+		return executeMemoryManager(fc.Args)
+	case "file_actions":
+		return executeFileActions(fc.Args)
+	case "read_chat":
+		return executeReadChat(fc.Args)
+	case "send_to_chat":
+		return executeSendToChat(fc.Args)
 	default:
 		return map[string]any{
 			"success": false,
@@ -222,6 +344,7 @@ func executeCreateImage(args map[string]any) map[string]any {
 
 func executeSendFile(args map[string]any, chatID int64, replyToMsgID int32) map[string]any {
 	filePath, _ := args["file_path"].(string)
+	caption, _ := args["caption"].(string)
 
 	if filePath == "" {
 		return map[string]any{"success": false, "error": "file_path is required"}
@@ -231,13 +354,17 @@ func executeSendFile(args map[string]any, chatID int64, replyToMsgID int32) map[
 		return map[string]any{"success": false, "error": "File not found"}
 	}
 
-	log.Printf("[AiChat] Sending file %s to chat %d", filePath, chatID)
+	if caption == "" {
+		caption = "🎨 Generated image"
+	}
+
+	log.Printf("[AiChat] Sending file %s to chat %d with caption %q", filePath, chatID, caption)
 
 	_, err := botClient.SendMedia(chatID, filePath, &telegram.MediaOptions{
 		ReplyTo: &telegram.InputReplyToMessage{
 			ReplyToMsgID: replyToMsgID,
 		},
-		Caption:       "🎨 Generated image",
+		Caption:       caption,
 		ForceDocument: true,
 	})
 
@@ -300,12 +427,12 @@ func executeRunCode(args map[string]any) map[string]any {
 		return map[string]any{
 			"success": false,
 			"error":   fmt.Sprintf("Execution failed: %s", errOutput),
-			"output":  output,
+			"output":  truncateTerminalOutput(output),
 		}
 	}
 
 	log.Printf("[AiChat] Code execution successful, output length: %d", len(output))
-	return map[string]any{"success": true, "output": output}
+	return map[string]any{"success": true, "output": truncateTerminalOutput(output)}
 }
 
 func executeGetLatestData(args map[string]any) map[string]any {
@@ -327,7 +454,6 @@ func executeGetLatestData(args map[string]any) map[string]any {
 		"answer":  result.Answer,
 	}
 
-	// Upload sources to Telegraph if we have any
 	if len(result.Sources) > 0 {
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("Query: %s\n\n", query))
@@ -351,4 +477,287 @@ func executeGetLatestData(args map[string]any) map[string]any {
 	}
 
 	return resp
+}
+
+func executeMemoryManager(args map[string]any) map[string]any {
+	action, _ := args["action"].(string)
+	userIDStr, _ := args["userid"].(string)
+	text, _ := args["text"].(string)
+	indexVal, hasIndex := args["index"]
+
+	if action == "" || userIDStr == "" {
+		return map[string]any{"success": false, "error": "action and userid are required"}
+	}
+
+	var userID int64
+	_, err := fmt.Sscanf(userIDStr, "%d", &userID)
+	if err != nil {
+		return map[string]any{"success": false, "error": "invalid userid format"}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	coll := mongoDB.Collection("memories")
+
+	switch action {
+	case "add":
+		if text == "" {
+			return map[string]any{"success": false, "error": "text is required to add memory"}
+		}
+		opts := options.FindOne().SetSort(bson.D{{Key: "index", Value: -1}})
+		var lastMem Memory
+		err := coll.FindOne(ctx, bson.M{"user_id": userID}, opts).Decode(&lastMem)
+		nextIndex := 1
+		if err == nil {
+			nextIndex = lastMem.Index + 1
+		}
+		if nextIndex > 100 {
+			return map[string]any{"success": false, "error": "memory limit reached (max 100)"}
+		}
+
+		newMem := Memory{
+			UserID:    userID,
+			Index:     nextIndex,
+			Text:      text,
+			UpdatedAt: time.Now(),
+		}
+		_, err = coll.InsertOne(ctx, newMem)
+		if err != nil {
+			return map[string]any{"success": false, "error": err.Error()}
+		}
+		return map[string]any{"success": true, "message": fmt.Sprintf("Memory added successfully at index %d", nextIndex), "index": nextIndex}
+
+	case "edit":
+		if text == "" {
+			return map[string]any{"success": false, "error": "text is required to edit memory"}
+		}
+		if !hasIndex {
+			return map[string]any{"success": false, "error": "index is required to edit memory"}
+		}
+		var index int
+		switch v := indexVal.(type) {
+		case float64:
+			index = int(v)
+		case int:
+			index = v
+		case int32:
+			index = int(v)
+		case int64:
+			index = int(v)
+		default:
+			return map[string]any{"success": false, "error": "invalid index type"}
+		}
+
+		res, err := coll.UpdateOne(ctx, bson.M{"user_id": userID, "index": index}, bson.M{"$set": bson.M{"text": text, "updated_at": time.Now()}})
+		if err != nil {
+			return map[string]any{"success": false, "error": err.Error()}
+		}
+		if res.MatchedCount == 0 {
+			return map[string]any{"success": false, "error": fmt.Sprintf("Memory index %d not found for user", index)}
+		}
+		return map[string]any{"success": true, "message": "Memory updated successfully"}
+
+	case "delete":
+		if !hasIndex {
+			return map[string]any{"success": false, "error": "index is required to delete memory"}
+		}
+		var index int
+		switch v := indexVal.(type) {
+		case float64:
+			index = int(v)
+		case int:
+			index = v
+		case int32:
+			index = int(v)
+		case int64:
+			index = int(v)
+		default:
+			return map[string]any{"success": false, "error": "invalid index type"}
+		}
+
+		res, err := coll.DeleteOne(ctx, bson.M{"user_id": userID, "index": index})
+		if err != nil {
+			return map[string]any{"success": false, "error": err.Error()}
+		}
+		if res.DeletedCount == 0 {
+			return map[string]any{"success": false, "error": fmt.Sprintf("Memory index %d not found for user", index)}
+		}
+		return map[string]any{"success": true, "message": "Memory deleted successfully"}
+
+	default:
+		return map[string]any{"success": false, "error": "unknown action"}
+	}
+}
+
+func executeFileActions(args map[string]any) map[string]any {
+	action, _ := args["action"].(string)
+	filePath, _ := args["file_path"].(string)
+	content, _ := args["content"].(string)
+	findText, _ := args["find"].(string)
+	replaceText, _ := args["replace"].(string)
+
+	if action == "" || filePath == "" {
+		return map[string]any{"success": false, "error": "action and file_path are required"}
+	}
+
+	cleanPath := filepath.Clean(filePath)
+	if !strings.HasPrefix(cleanPath, "/workspace/") && !strings.HasPrefix(cleanPath, "/app/generated/") && !strings.HasPrefix(cleanPath, "/tmp/") {
+		return map[string]any{"success": false, "error": "access denied: path outside allowed directories"}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	switch action {
+	case "read":
+		data, err := os.ReadFile(cleanPath)
+		if err != nil {
+			return map[string]any{"success": false, "error": err.Error()}
+		}
+		return map[string]any{
+			"success": true,
+			"content": truncateTerminalOutput(string(data)),
+		}
+
+	case "create":
+		dir := filepath.Dir(cleanPath)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return map[string]any{"success": false, "error": fmt.Sprintf("failed to create directory: %v", err)}
+		}
+		err := os.WriteFile(cleanPath, []byte(content), 0644)
+		if err != nil {
+			return map[string]any{"success": false, "error": err.Error()}
+		}
+		return map[string]any{"success": true, "message": "file created successfully"}
+
+	case "edit":
+		data, err := os.ReadFile(cleanPath)
+		if err != nil {
+			return map[string]any{"success": false, "error": err.Error()}
+		}
+		original := string(data)
+
+		var updated string
+		if findText != "" {
+			if !strings.Contains(original, findText) {
+				return map[string]any{"success": false, "error": "find text not found in file"}
+			}
+			updated = strings.Replace(original, findText, replaceText, -1)
+		} else {
+			updated = content
+		}
+
+		err = os.WriteFile(cleanPath, []byte(updated), 0644)
+		if err != nil {
+			return map[string]any{"success": false, "error": err.Error()}
+		}
+		return map[string]any{"success": true, "message": "file edited successfully"}
+
+	case "upload":
+		data, err := os.ReadFile(cleanPath)
+		if err != nil {
+			return map[string]any{"success": false, "error": err.Error()}
+		}
+		mimeType := http.DetectContentType(data)
+		fileName := filepath.Base(cleanPath)
+
+		googleFile, err := uploadToGemini(ctx, data, fileName, mimeType)
+		if err != nil {
+			return map[string]any{"success": false, "error": fmt.Sprintf("Gemini upload failed: %v", err)}
+		}
+
+		return map[string]any{
+			"success":         true,
+			"google_file_uri": googleFile.URI,
+			"mime_type":       googleFile.MIMEType,
+			"file_name":       fileName,
+		}
+
+	default:
+		return map[string]any{"success": false, "error": "unknown file action"}
+	}
+}
+
+func executeReadChat(args map[string]any) map[string]any {
+	chatIDVal, _ := args["chat_id"]
+	limitVal, _ := args["limit"]
+
+	var chatID int64
+	switch v := chatIDVal.(type) {
+	case float64:
+		chatID = int64(v)
+	case int64:
+		chatID = v
+	default:
+		return map[string]any{"success": false, "error": "invalid chat_id type"}
+	}
+
+	limit := 10
+	if limitVal != nil {
+		switch v := limitVal.(type) {
+		case float64:
+			limit = int(v)
+		case int:
+			limit = v
+		}
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	messages, err := botClient.GetMessages(chatID, &telegram.SearchOption{Limit: int32(limit)})
+	if err != nil {
+		return map[string]any{"success": false, "error": err.Error()}
+	}
+
+	var msgsList []map[string]any
+	for _, m := range messages {
+		msgsList = append(msgsList, map[string]any{
+			"message_id": m.ID,
+			"sender":     getSenderFromMessage(&m),
+			"sender_id":  m.SenderID(),
+			"text":       m.Text(),
+			"is_media":   m.Media() != nil,
+		})
+	}
+
+	return map[string]any{
+		"success":  true,
+		"chat_id":  chatID,
+		"messages": msgsList,
+	}
+}
+
+func executeSendToChat(args map[string]any) map[string]any {
+	chatIDVal, _ := args["chat_id"]
+	text, _ := args["text"].(string)
+
+	var chatID int64
+	switch v := chatIDVal.(type) {
+	case float64:
+		chatID = int64(v)
+	case int64:
+		chatID = v
+	default:
+		return map[string]any{"success": false, "error": "invalid chat_id type"}
+	}
+
+	if text == "" {
+		return map[string]any{"success": false, "error": "text is required"}
+	}
+
+	msg, err := botClient.SendMessage(chatID, text, &telegram.SendOptions{ParseMode: "Markdown"})
+	if err != nil {
+		msg, err = botClient.SendMessage(chatID, text, nil)
+	}
+	if err != nil {
+		return map[string]any{"success": false, "error": err.Error()}
+	}
+
+	return map[string]any{
+		"success":    true,
+		"message_id": msg.ID,
+		"chat_id":    chatID,
+	}
 }
