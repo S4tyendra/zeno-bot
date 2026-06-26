@@ -359,6 +359,19 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 	return sendLargeResponse(m, placeholder, responseText)
 }
 
+func isInlineSupported(mime string) bool {
+	if strings.HasPrefix(mime, "image/") {
+		return true
+	}
+	if strings.HasPrefix(mime, "audio/") {
+		return true
+	}
+	if mime == "application/pdf" {
+		return true
+	}
+	return false
+}
+
 func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string, limit int) ([]*genai.Content, error) {
 	chatID := m.ChatID()
 	replyToMsgID := m.ReplyToMsgID()
@@ -478,13 +491,17 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 		parts = append(parts, &genai.Part{Text: formattedXML})
 
 		if !isBot && hasFile && !isText {
-			log.Printf("[AiChat] Attaching inline media part %s (%s, %d bytes) to Gemini context for msg ID %d", fileDoc.FileName, fileDoc.MIMEType, len(fileDoc.Data), msgID)
-			parts = append(parts, &genai.Part{
-				InlineData: &genai.Blob{
-					Data:     fileDoc.Data,
-					MIMEType: fileDoc.MIMEType,
-				},
-			})
+			if isInlineSupported(fileDoc.MIMEType) {
+				log.Printf("[AiChat] Attaching inline media part %s (%s, %d bytes) to Gemini context for msg ID %d", fileDoc.FileName, fileDoc.MIMEType, len(fileDoc.Data), msgID)
+				parts = append(parts, &genai.Part{
+					InlineData: &genai.Blob{
+						Data:     fileDoc.Data,
+						MIMEType: fileDoc.MIMEType,
+					},
+				})
+			} else {
+				log.Printf("[AiChat] Skipping unsupported inline media part %s (%s) to prevent Gemini 400 error for msg ID %d", fileDoc.FileName, fileDoc.MIMEType, msgID)
+			}
 		}
 
 		role := genai.RoleUser
