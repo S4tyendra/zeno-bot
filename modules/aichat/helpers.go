@@ -74,8 +74,8 @@ func getSenderName(m *telegram.NewMessage) string {
 		name = sender.LastName
 	}
 	if name != "" {
-		if len(name) > 8 {
-			return name[:8]
+		if len(name) > 30 {
+			return name[:30]
 		}
 		return name
 	}
@@ -93,8 +93,8 @@ func getSenderFromMessage(msg *telegram.NewMessage) string {
 			name = msg.Sender.LastName
 		}
 		if name != "" {
-			if len(name) > 8 {
-				return name[:8]
+			if len(name) > 30 {
+				return name[:30]
 			}
 			return name
 		}
@@ -212,12 +212,23 @@ func downloadMedia(msg *telegram.NewMessage) ([]byte, string, string) {
 	var fileName string
 	var mimeType string
 
-	switch msg.Message.Media.(type) {
+	switch media := msg.Message.Media.(type) {
 	case *telegram.MessageMediaPhoto:
 		mimeType = "image/jpeg"
 		fileName = "photo.jpg"
 	case *telegram.MessageMediaDocument:
 		mimeType = "application/octet-stream"
+		if doc, ok := media.Document.(*telegram.DocumentObj); ok {
+			if doc.MimeType != "" {
+				mimeType = doc.MimeType
+			}
+			for _, attr := range doc.Attributes {
+				if fn, ok := attr.(*telegram.DocumentAttributeFilename); ok && fn.FileName != "" {
+					fileName = fn.FileName
+					break
+				}
+			}
+		}
 	default:
 		return nil, "", ""
 	}

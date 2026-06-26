@@ -50,6 +50,11 @@ You are Intelligent, a 22-year-old girl on Telegram (@iSatyaBot). You are tech-s
 - If a task requires fetching, processing, or downloading, USE THE TOOLS automatically.
 - Example: If asked something that you are not sure, DO NOT hallucinate or guess. Immediately use 'get_latest_data' and report the facts - even if you are not sure, Start your response with IDK.
 
+## Context Awareness
+- **Stay focused:** Answer ONLY what the user asked in their latest message. File names and past chat content are just context — don't go off on tangents investigating unrelated keywords you see in filenames.
+- **Be efficient with tools:** Don't run the same command multiple times. Use -la flags upfront. If a tool returns nothing useful, move on rather than rephrasing the query.
+- **Read THEN act:** If a file was shared in chat, use read_chat or look at the file URI in context before downloading or searching for it elsewhere.
+
 ## Available Tools
 You have access to these tools:
 - **send_file**: Send a file to the user. Params: file_path (required), caption (optional).
@@ -427,10 +432,12 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 	memoriesXMLBuilder.WriteString("</memories>")
 
 	var contents []*genai.Content
-	contents = append(contents, &genai.Content{
-		Role:  genai.RoleUser,
-		Parts: []*genai.Part{{Text: memoriesXMLBuilder.String()}},
-	})
+	if len(memoriesMap) > 0 {
+		contents = append(contents, &genai.Content{
+			Role:  genai.RoleUser,
+			Parts: []*genai.Part{{Text: memoriesXMLBuilder.String()}},
+		})
+	}
 
 	for _, msg := range history {
 		senderID := msg.SenderID()
@@ -565,7 +572,12 @@ func handleFileUpload(ctx context.Context, m *telegram.NewMessage) (*UploadedFil
 	coll := mongoDB.Collection("uploaded_files")
 	_, err = coll.InsertOne(ctx, upFile)
 	if err != nil {
-		log.Printf("[AiChat] Failed to save file mapping to DB: %v", err)
+		insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, err = coll.InsertOne(insertCtx, upFile)
+		insertCancel()
+		if err != nil {
+			log.Printf("[AiChat] Failed to save file mapping to DB after retry: %v", err)
+		}
 	}
 
 	return &upFile, nil
@@ -700,7 +712,7 @@ func processWithFunctionCalling(contents []*genai.Content, chatID int64, current
 		ResponseModalities: []string{"TEXT"},
 	}
 
-	maxIterations := 5
+	maxIterations := 4
 	var finalText string
 	var sourcesURL string
 
