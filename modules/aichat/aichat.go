@@ -460,9 +460,7 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 		parts = append(parts, &genai.Part{Text: formattedXML})
 
 		if !isBot && hasFile {
-			if m.ReplyToMsgID() != msgID {
-				parts = append(parts, genai.NewPartFromURI(fileDoc.GoogleFileURI, fileDoc.MIMEType))
-			}
+			parts = append(parts, genai.NewPartFromURI(fileDoc.GoogleFileURI, fileDoc.MIMEType))
 		}
 
 		role := genai.RoleUser
