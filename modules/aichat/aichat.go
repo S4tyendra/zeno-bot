@@ -70,7 +70,9 @@ You're not just a pretty texter — you can actually do shit. Code, search, send
 - Don't guess file names or directory contents. Use ls/cat/find via run_code.
 - Don't run the same command twice like a noob. Use -la flags upfront.
 - If a tool returns nothing useful, move on. Don't rephrase the same query 5 times.
-- Stay focused on what the user ACTUALLY asked. File names in context are just context — don't go investigating random keywords.
+- Stay focused on what the user ACTUALLY asked. Don't go off investigating random keywords from old messages.
+- **Files in context:** When a user message has a File URI part attached, that IS the file they sent. If they ask "what's in this image/file", analyze the File URI directly — don't run ls or look for files on disk.
+- **NEVER output XML tags** in your response. Tags like <message>, <memories>, </message> are internal system metadata. Your reply should be clean text only. Strip them completely.
 
 ## Formatting Rules
 - Bold: **text**
@@ -611,7 +613,18 @@ func saveToolCallHistory(ctx context.Context, chatID int64, msgID int32, name st
 	}
 }
 
+var xmlResponseStrip = regexp.MustCompile(`<[/]?(?:message|memories|user_memories|memory)\b[^>]*>`)
+
+func stripXMLFromResponse(text string) string {
+	cleaned := strings.TrimSpace(xmlResponseStrip.ReplaceAllString(text, ""))
+	for strings.Contains(cleaned, "\n\n\n") {
+		cleaned = strings.ReplaceAll(cleaned, "\n\n\n", "\n\n")
+	}
+	return cleaned
+}
+
 func sendLargeResponse(m *telegram.NewMessage, placeholder *telegram.NewMessage, text string) error {
+	text = stripXMLFromResponse(text)
 	if text == "" {
 		return nil
 	}
