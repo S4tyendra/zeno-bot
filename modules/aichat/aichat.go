@@ -220,7 +220,7 @@ func Register(client *telegram.Client) {
 func InitMongoDB() {
 	uri := os.Getenv("MONGO_URI")
 	if uri == "" {
-		uri = "mongodb://localhost:27017"
+		uri = "mongodb://db:27017"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

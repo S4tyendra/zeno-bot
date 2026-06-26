@@ -10,21 +10,21 @@ import (
 )
 
 var (
-	BotToken             string
-	MongoDBURL           string
-	AppID                int
-	AppHash              string
+	BotToken                string
+	MongoDBURL              string
+	AppID                   int
+	AppHash                 string
 	VertexProjectID         string
 	VertexLocation          string
 	VertexCredentialsBase64 string
 	AllowedChatIDs          []int64
-	MaxMediaSize         int64
-	DefaultModel         string
-	ImageModel           string
-	HighImageModel       string
-	TelegraphAccessToken string
-	PerplexityJWT        string
-	ExchangeRateAPIKey   string
+	MaxMediaSize            int64
+	DefaultModel            string
+	ImageModel              string
+	HighImageModel          string
+	TelegraphAccessToken    string
+	PerplexityJWT           string
+	ExchangeRateAPIKey      string
 )
 
 func Load() {
@@ -37,7 +37,7 @@ func Load() {
 
 	MongoDBURL = os.Getenv("MONGODB_URL")
 	if MongoDBURL == "" {
-		MongoDBURL = "mongodb://localhost:27017"
+		MongoDBURL = "mongodb://db:27017"
 	}
 
 	appIDStr := os.Getenv("APP_ID")
