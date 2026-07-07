@@ -326,9 +326,9 @@ func handleMessage(m *telegram.NewMessage) error {
 
 func processAIRequest(m *telegram.NewMessage, query string) error {
 	chatID := m.ChatID()
-	limit := 10
+	limit := 50
 	if m.IsPrivate() {
-		limit = 15
+		limit = 50
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
