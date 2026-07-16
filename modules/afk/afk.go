@@ -98,9 +98,9 @@ func handleAFK(m *telegram.NewMessage) error {
 	var response string
 	escapedName := html.EscapeString(senderName)
 	if reason != "" {
-		response = fmt.Sprintf("<b>%s is now AFK</b>\n\nReason: <i>%s</i>", escapedName, html.EscapeString(reason))
+		response = fmt.Sprintf("See ya, <b>%s</b>! You are now AFK.\nReason: %s", escapedName, html.EscapeString(reason))
 	} else {
-		response = fmt.Sprintf("<b>%s is now AFK</b>", escapedName)
+		response = fmt.Sprintf("See ya, <b>%s</b>! You are now AFK.", escapedName)
 	}
 
 	m.Reply(response, &telegram.SendOptions{ParseMode: "HTML"})
@@ -142,7 +142,7 @@ func handleMessage(m *telegram.NewMessage) error {
 
 				senderName := getSenderFirstName(m.Sender, userID)
 				duration := formatDuration(time.Since(senderAFK.AFKTime))
-				m.Reply(fmt.Sprintf("Welcome back %s, you are no longer AFK.\nAFK Time: <code>%s</code>", html.EscapeString(senderName), html.EscapeString(duration)), &telegram.SendOptions{ParseMode: "HTML"})
+				m.Reply(fmt.Sprintf("Welcome back, <b>%s</b>!\nYou were away for %s.", html.EscapeString(senderName), html.EscapeString(duration)), &telegram.SendOptions{ParseMode: "HTML"})
 			}
 		}
 	}
@@ -172,9 +172,9 @@ func handleMessage(m *telegram.NewMessage) error {
 						escapedTargetName := html.EscapeString(targetName)
 						escapedDuration := html.EscapeString(duration)
 						if targetAFK.Reason != "" {
-							response = fmt.Sprintf("<b>%s is AFK since</b> <code>%s</code>\n<b>Reason:</b> <i>%s</i>", escapedTargetName, escapedDuration, html.EscapeString(targetAFK.Reason))
+							response = fmt.Sprintf("<b>%s</b> is AFK (away for %s)\nReason: %s", escapedTargetName, escapedDuration, html.EscapeString(targetAFK.Reason))
 						} else {
-							response = fmt.Sprintf("<b>%s is AFK since</b> <code>%s</code>", escapedTargetName, escapedDuration)
+							response = fmt.Sprintf("<b>%s</b> is AFK (away for %s)", escapedTargetName, escapedDuration)
 						}
 						m.Reply(response, &telegram.SendOptions{ParseMode: "HTML"})
 					}
@@ -225,9 +225,9 @@ func handleMessage(m *telegram.NewMessage) error {
 						escapedTargetName := html.EscapeString(targetName)
 						escapedDuration := html.EscapeString(duration)
 						if targetAFK.Reason != "" {
-							response = fmt.Sprintf("<b>%s is AFK since</b> <code>%s</code>\n<b>Reason:</b> <i>%s</i>", escapedTargetName, escapedDuration, html.EscapeString(targetAFK.Reason))
+							response = fmt.Sprintf("<b>%s</b> is AFK (away for %s)\nReason: %s", escapedTargetName, escapedDuration, html.EscapeString(targetAFK.Reason))
 						} else {
-							response = fmt.Sprintf("<b>%s is AFK since</b> <code>%s</code>", escapedTargetName, escapedDuration)
+							response = fmt.Sprintf("<b>%s</b> is AFK (away for %s)", escapedTargetName, escapedDuration)
 						}
 						m.Reply(response, &telegram.SendOptions{ParseMode: "HTML"})
 					}
