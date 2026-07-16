@@ -196,6 +196,9 @@ func Register(client *telegram.Client) {
 func InitMongoDB() {
 	uri := os.Getenv("MONGO_URI")
 	if uri == "" {
+		uri = config.MongoDBURL
+	}
+	if uri == "" {
 		uri = "mongodb://db:27017"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
