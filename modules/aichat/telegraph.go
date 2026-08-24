@@ -9,9 +9,6 @@ import (
 	"net/url"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo/options"
-
 	"zeno/config"
 	"zeno/db"
 )
@@ -26,9 +23,9 @@ type TelegraphResponse struct {
 }
 
 type TelegraphAccount struct {
-	AccessToken string `json:"access_token" bson:"access_token"`
-	ShortName   string `json:"short_name" bson:"short_name"`
-	AuthUrl     string `json:"auth_url" bson:"auth_url"`
+	AccessToken string `json:"access_token"`
+	ShortName   string `json:"short_name"`
+	AuthUrl     string `json:"auth_url"`
 }
 
 type CreateAccountResponse struct {
@@ -47,7 +44,7 @@ func ensureTelegraphToken() {
 
 	// Check DB first
 	var account TelegraphAccount
-	err := db.Collection("system_settings").FindOne(ctx, bson.M{"_id": "telegraph_token"}).Decode(&account)
+	err := db.GetSetting(ctx, "telegraph_token", &account)
 	if err == nil && account.AccessToken != "" {
 		config.TelegraphAccessToken = account.AccessToken
 		log.Println("[AiChat] Loaded Telegraph token from DB")
@@ -64,12 +61,7 @@ func ensureTelegraphToken() {
 	}
 
 	// Store in DB
-	_, err = db.Collection("system_settings").UpdateOne(
-		ctx,
-		bson.M{"_id": "telegraph_token"},
-		bson.M{"$set": newAccount},
-		options.Update().SetUpsert(true),
-	)
+	err = db.SetSetting(ctx, "telegraph_token", newAccount)
 	if err != nil {
 		log.Printf("[AiChat] Failed to store Telegraph token in DB: %v", err)
 	} else {

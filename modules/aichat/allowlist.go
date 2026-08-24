@@ -6,26 +6,24 @@ import (
 	"sync"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo/options"
-
 	"zeno/db"
 )
 
-// allowEntry is persisted to MongoDB.
+// allowEntry is persisted to Postgres.
 // Kind: "chat" (group allowed, users inside can use)
-//       "user" (individual allowed, can use anywhere)
+//
+//	"user" (individual allowed, can use anywhere)
 type allowEntry struct {
-	ID   int64  `bson:"_id"`
-	Kind string `bson:"kind"` // "chat" | "user"
+	ID   int64
+	Kind string // "chat" | "user"
 }
 
 const adminUserID int64 = 1089528685
 
 var (
-	allowMu       sync.RWMutex
-	allowedChats  = make(map[int64]bool) // group/chat → anyone inside can use
-	allowedUsers  = make(map[int64]bool) // user → can use anywhere
+	allowMu      sync.RWMutex
+	allowedChats = make(map[int64]bool) // group/chat → anyone inside can use
+	allowedUsers = make(map[int64]bool) // user → can use anywhere
 )
 
 func init() {
@@ -33,25 +31,24 @@ func init() {
 	allowedUsers[adminUserID] = true
 }
 
-// LoadAllowlist fetches the allowlist from MongoDB into memory.
+// LoadAllowlist fetches the allowlist from Postgres into memory.
 func LoadAllowlist() {
-	col := db.Collection("allowlist")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cur, err := col.Find(ctx, bson.M{})
+	rows, err := db.Pool.Query(ctx, `SELECT id, kind FROM allowlist`)
 	if err != nil {
 		log.Printf("[Allowlist] Failed to load from DB: %v", err)
 		return
 	}
-	defer cur.Close(ctx)
+	defer rows.Close()
 
 	allowMu.Lock()
 	defer allowMu.Unlock()
 
-	for cur.Next(ctx) {
+	for rows.Next() {
 		var e allowEntry
-		if err := cur.Decode(&e); err != nil {
+		if err := rows.Scan(&e.ID, &e.Kind); err != nil {
 			continue
 		}
 		switch e.Kind {
@@ -65,26 +62,23 @@ func LoadAllowlist() {
 }
 
 func upsertAllow(id int64, kind string) {
-	col := db.Collection("allowlist")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := col.UpdateOne(ctx,
-		bson.M{"_id": id},
-		bson.M{"$set": bson.M{"_id": id, "kind": kind}},
-		options.Update().SetUpsert(true),
-	)
+	_, err := db.Pool.Exec(ctx, `
+		INSERT INTO allowlist (id, kind) VALUES ($1, $2)
+		ON CONFLICT (id) DO UPDATE SET kind = EXCLUDED.kind`,
+		id, kind)
 	if err != nil {
 		log.Printf("[Allowlist] DB upsert error: %v", err)
 	}
 }
 
 func deleteAllow(id int64) {
-	col := db.Collection("allowlist")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := col.DeleteOne(ctx, bson.M{"_id": id})
+	_, err := db.Pool.Exec(ctx, `DELETE FROM allowlist WHERE id = $1`, id)
 	if err != nil {
 		log.Printf("[Allowlist] DB delete error: %v", err)
 	}

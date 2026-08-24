@@ -2,46 +2,133 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"time"
 
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"zeno/config"
 )
 
 var (
-	Client *mongo.Client
-	DB     *mongo.Database
+	Pool      *pgxpool.Pool
+	ErrNoRows = pgx.ErrNoRows
 )
 
+var schemaStatements = []string{
+	`CREATE TABLE IF NOT EXISTS allowlist (
+		id BIGINT PRIMARY KEY,
+		kind TEXT NOT NULL CHECK (kind IN ('chat', 'user'))
+	)`,
+	`CREATE TABLE IF NOT EXISTS gpt_auth (
+		id TEXT PRIMARY KEY,
+		access_token TEXT NOT NULL DEFAULT '',
+		refresh_token TEXT NOT NULL DEFAULT '',
+		id_token TEXT NOT NULL DEFAULT '',
+		account_id TEXT NOT NULL DEFAULT '',
+		last_refresh TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE TABLE IF NOT EXISTS system_settings (
+		key TEXT PRIMARY KEY,
+		value JSONB NOT NULL DEFAULT '{}'::jsonb,
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE TABLE IF NOT EXISTS vertex_links (
+		id UUID PRIMARY KEY,
+		links JSONB NOT NULL,
+		sent BOOLEAN NOT NULL DEFAULT FALSE
+	)`,
+	`CREATE TABLE IF NOT EXISTS memories (
+		user_id BIGINT NOT NULL,
+		index INT NOT NULL,
+		text TEXT NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (user_id, index)
+	)`,
+	`CREATE TABLE IF NOT EXISTS uploaded_files (
+		chat_id BIGINT NOT NULL,
+		msg_id INTEGER NOT NULL,
+		google_file_uri TEXT NOT NULL DEFAULT '',
+		mime_type TEXT NOT NULL DEFAULT '',
+		file_name TEXT NOT NULL DEFAULT '',
+		uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		data BYTEA,
+		PRIMARY KEY (chat_id, msg_id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS tool_history (
+		chat_id BIGINT NOT NULL,
+		msg_id INTEGER NOT NULL,
+		tool_calls JSONB NOT NULL DEFAULT '[]'::jsonb,
+		uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (chat_id, msg_id)
+	)`,
+}
+
 func Connect() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	var err error
-	Client, err = mongo.Connect(ctx, options.Client().ApplyURI(config.MongoDBURL))
+	cfg, err := pgxpool.ParseConfig(config.PostgresDSN())
 	if err != nil {
-		log.Fatal("Failed to connect to MongoDB:", err)
+		log.Fatal("Failed to parse Postgres config:", err)
+	}
+	cfg.MaxConns = 10
+	cfg.MinConns = 1
+	cfg.MaxConnLifetime = time.Hour
+	cfg.ConnConfig.ConnectTimeout = 10 * time.Second
+
+	Pool, err = pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		log.Fatal("Failed to connect to Postgres:", err)
 	}
 
-	if err = Client.Ping(ctx, nil); err != nil {
-		log.Fatal("Failed to ping MongoDB:", err)
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pingCancel()
+	if err = Pool.Ping(pingCtx); err != nil {
+		log.Fatal("Failed to ping Postgres:", err)
 	}
 
-	DB = Client.Database("zeno")
-	log.Println("Connected to MongoDB")
+	if err = migrate(ctx); err != nil {
+		log.Fatal("Failed to migrate Postgres schema:", err)
+	}
+
+	log.Println("Connected to Postgres")
 }
 
 func Disconnect() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := Client.Disconnect(ctx); err != nil {
-		log.Println("Error disconnecting from MongoDB:", err)
+	if Pool != nil {
+		Pool.Close()
 	}
 }
 
-func Collection(name string) *mongo.Collection {
-	return DB.Collection(name)
+func migrate(ctx context.Context) error {
+	for _, stmt := range schemaStatements {
+		if _, err := Pool.Exec(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func GetSetting(ctx context.Context, key string, dest any) error {
+	var raw []byte
+	if err := Pool.QueryRow(ctx, `SELECT value FROM system_settings WHERE key = $1`, key).Scan(&raw); err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, dest)
+}
+
+func SetSetting(ctx context.Context, key string, value any) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	_, err = Pool.Exec(ctx, `
+		INSERT INTO system_settings (key, value, updated_at)
+		VALUES ($1, $2::jsonb, NOW())
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+		key, string(raw))
+	return err
 }

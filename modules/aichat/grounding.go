@@ -2,14 +2,14 @@ package aichat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
 	"time"
 
 	"github.com/amarnathcjd/gogram/telegram"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/google/uuid"
 	"google.golang.org/genai"
 
 	"zeno/db"
@@ -31,20 +31,21 @@ func storeGroundingLinks(chunks []*genai.GroundingChunk) (string, error) {
 		return "", fmt.Errorf("no web links found")
 	}
 
-	doc := models.VertexLinks{
-		Links: links,
-		Sent:  false,
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	result, err := db.Collection("vertexlinks").InsertOne(ctx, doc)
+	linksJSON, err := json.Marshal(links)
 	if err != nil {
 		return "", err
 	}
 
-	return result.InsertedID.(primitive.ObjectID).Hex(), nil
+	id := uuid.New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err = db.Pool.Exec(ctx, `INSERT INTO vertex_links (id, links, sent) VALUES ($1, $2::jsonb, false)`, id, string(linksJSON))
+	if err != nil {
+		return "", err
+	}
+
+	return id.String(), nil
 }
 
 func handleGetVertexLinks(cb *telegram.CallbackQuery) error {
@@ -56,8 +57,7 @@ func handleGetVertexLinks(cb *telegram.CallbackQuery) error {
 		return nil
 	}
 
-	linkID := parts[1]
-	objID, err := primitive.ObjectIDFromHex(linkID)
+	linkID, err := uuid.Parse(parts[1])
 	if err != nil {
 		cb.Answer("Invalid link ID", &telegram.CallbackOptions{Alert: true})
 		return nil
@@ -66,27 +66,34 @@ func handleGetVertexLinks(cb *telegram.CallbackQuery) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	var doc models.VertexLinks
-	err = db.Collection("vertexlinks").FindOne(ctx, bson.M{"_id": objID}).Decode(&doc)
+	var linksJSON []byte
+	var sent bool
+	err = db.Pool.QueryRow(ctx, `SELECT links, sent FROM vertex_links WHERE id = $1`, linkID).Scan(&linksJSON, &sent)
 	if err != nil {
 		cb.Answer("Links not found", &telegram.CallbackOptions{Alert: true})
 		return nil
 	}
 
-	if doc.Sent {
+	if sent {
 		cb.Answer("Links already sent", &telegram.CallbackOptions{Alert: true})
+		return nil
+	}
+
+	var links []models.GroundingLink
+	if err := json.Unmarshal(linksJSON, &links); err != nil {
+		cb.Answer("Links not found", &telegram.CallbackOptions{Alert: true})
 		return nil
 	}
 
 	var sb strings.Builder
 	sb.WriteString("🔗 Grounded Links:\n\n")
-	for i, link := range doc.Links {
+	for i, link := range links {
 		sb.WriteString(fmt.Sprintf("%d. %s\n%s\n\n", i+1, link.Title, link.URI))
 	}
 
 	botClient.SendMessage(cb.ChatID, sb.String(), nil)
 
-	db.Collection("vertexlinks").UpdateOne(ctx, bson.M{"_id": objID}, bson.M{"$set": bson.M{"sent": true}})
+	_, _ = db.Pool.Exec(ctx, `UPDATE vertex_links SET sent = true WHERE id = $1`, linkID)
 
 	cb.Answer("Links sent!", nil)
 	return nil

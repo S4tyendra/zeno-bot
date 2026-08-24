@@ -12,15 +12,12 @@ import (
 
 	"zeno/config"
 	"zeno/db"
-
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type ExchangeRateData struct {
-	Base       string             `json:"base_code" bson:"base_code"`
-	Rates      map[string]float64 `json:"conversion_rates" bson:"conversion_rates"`
-	LastUpdate time.Time          `json:"-" bson:"last_update"`
+	Base       string             `json:"base_code"`
+	Rates      map[string]float64 `json:"conversion_rates"`
+	LastUpdate time.Time          `json:"last_update"`
 }
 
 var (
@@ -51,7 +48,7 @@ func updateRates() {
 	defer cancel()
 
 	var data ExchangeRateData
-	err := db.Collection("system_settings").FindOne(ctx, bson.M{"_id": "exchange_rates"}).Decode(&data)
+	err := db.GetSetting(ctx, "exchange_rates", &data)
 
 	if err == nil {
 		ratesMutex.Lock()
@@ -91,12 +88,7 @@ func updateRates() {
 
 	data.LastUpdate = time.Now()
 
-	_, err = db.Collection("system_settings").UpdateOne(
-		ctx,
-		bson.M{"_id": "exchange_rates"},
-		bson.M{"$set": data},
-		options.Update().SetUpsert(true),
-	)
+	err = db.SetSetting(ctx, "exchange_rates", data)
 
 	if err != nil {
 		log.Printf("[Currency] Failed to cache rates in DB: %v", err)

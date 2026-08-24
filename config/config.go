@@ -2,6 +2,8 @@ package config
 
 import (
 	"log"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -11,7 +13,13 @@ import (
 
 var (
 	BotToken                string
-	MongoDBURL              string
+	DatabaseURL             string
+	DBHost                  string
+	DBPort                  string
+	DBName                  string
+	DBUser                  string
+	DBPass                  string
+	DBSSLMode               string
 	AppID                   int
 	AppHash                 string
 	VertexProjectID         string
@@ -29,15 +37,28 @@ var (
 
 func Load() {
 	_ = godotenv.Load()
+	_ = godotenv.Overload("sql.env")
 
 	BotToken = os.Getenv("BOT_TOKEN")
 	if BotToken == "" {
 		log.Fatal("BOT_TOKEN is required")
 	}
 
-	MongoDBURL = os.Getenv("MONGODB_URL")
-	if MongoDBURL == "" {
-		MongoDBURL = "mongodb://db:27017"
+	DatabaseURL = os.Getenv("DATABASE_URL")
+	DBHost = os.Getenv("DB_HOST")
+	DBPort = os.Getenv("DB_PORT")
+	if DBPort == "" {
+		DBPort = "5432"
+	}
+	DBName = os.Getenv("DB_NAME")
+	DBUser = os.Getenv("DB_USER")
+	DBPass = os.Getenv("DB_PASS")
+	DBSSLMode = os.Getenv("DB_SSLMODE")
+	if DBSSLMode == "" {
+		DBSSLMode = "disable"
+	}
+	if DatabaseURL == "" && (DBHost == "" || DBName == "" || DBUser == "") {
+		log.Fatal("DATABASE_URL or DB_HOST/DB_NAME/DB_USER is required")
 	}
 
 	appIDStr := os.Getenv("APP_ID")
@@ -108,4 +129,20 @@ func Load() {
 	TelegraphAccessToken = os.Getenv("TELEGRAPH_ACCESS_TOKEN")
 	PerplexityJWT = os.Getenv("PERPLEXITY_JWT")
 	ExchangeRateAPIKey = os.Getenv("EXCHANGERATE_API_KEY")
+}
+
+func PostgresDSN() string {
+	if DatabaseURL != "" {
+		return DatabaseURL
+	}
+	u := url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(DBUser, DBPass),
+		Host:   net.JoinHostPort(DBHost, DBPort),
+		Path:   "/" + DBName,
+	}
+	q := url.Values{}
+	q.Set("sslmode", DBSSLMode)
+	u.RawQuery = q.Encode()
+	return u.String()
 }

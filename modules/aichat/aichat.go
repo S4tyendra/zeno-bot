@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -15,12 +14,8 @@ import (
 	"github.com/amarnathcjd/gogram/telegram"
 	"google.golang.org/genai"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-
 	"zeno/config"
+	"zeno/db"
 )
 
 const SYSTEM_PROMPT = `
@@ -101,43 +96,38 @@ var (
 	genaiClient *genai.Client
 	askPattern  = regexp.MustCompile(`(?i)@ask\b`)
 	gptPattern  = regexp.MustCompile(`(?i)(?:^|\s)/gpt\b`)
-	mongoClient *mongo.Client
-	mongoDB     *mongo.Database
 )
 
 var maxMediaSize int64
 
 type Memory struct {
-	ID        primitive.ObjectID `bson:"_id,omitempty"`
-	UserID    int64              `bson:"user_id"`
-	Index     int                `bson:"index"`
-	Text      string             `bson:"text"`
-	UpdatedAt time.Time          `bson:"updated_at"`
+	UserID    int64
+	Index     int
+	Text      string
+	UpdatedAt time.Time
 }
 
 type UploadedFile struct {
-	ID            primitive.ObjectID `bson:"_id,omitempty"`
-	ChatID        int64              `bson:"chat_id"`
-	MsgID         int32              `bson:"msg_id"`
-	GoogleFileURI string             `bson:"google_file_uri"`
-	MIMEType      string             `bson:"mime_type"`
-	FileName      string             `bson:"file_name"`
-	UploadedAt    time.Time          `bson:"uploaded_at"`
-	Data          []byte             `bson:"data,omitempty"`
+	ChatID        int64
+	MsgID         int32
+	GoogleFileURI string
+	MIMEType      string
+	FileName      string
+	UploadedAt    time.Time
+	Data          []byte
 }
 
 type SavedToolCall struct {
-	Name     string `bson:"name"`
-	Args     string `bson:"args"`
-	Response string `bson:"response"`
+	Name     string `json:"name"`
+	Args     string `json:"args"`
+	Response string `json:"response"`
 }
 
 type ToolCallHistory struct {
-	ID         primitive.ObjectID `bson:"_id,omitempty"`
-	ChatID     int64              `bson:"chat_id"`
-	MsgID      int32              `bson:"msg_id"`
-	ToolCalls  []SavedToolCall    `bson:"tool_calls"`
-	UploadedAt time.Time          `bson:"uploaded_at"`
+	ChatID     int64
+	MsgID      int32
+	ToolCalls  []SavedToolCall
+	UploadedAt time.Time
 }
 
 func Register(client *telegram.Client) {
@@ -173,8 +163,6 @@ func Register(client *telegram.Client) {
 	}
 	log.Println("[AiChat] GenAI client initialized with Vertex AI backend")
 
-	InitMongoDB()
-
 	for _, id := range config.AllowedChatIDs {
 		AddAllowChat(id)
 	}
@@ -191,32 +179,6 @@ func Register(client *telegram.Client) {
 	client.On("cmd:search", handleSearch)
 	client.On("message", handleMessage)
 	client.On("callback:get_vertex_links", handleGetVertexLinks)
-}
-
-func InitMongoDB() {
-	uri := os.Getenv("MONGO_URI")
-	if uri == "" {
-		uri = config.MongoDBURL
-	}
-	if uri == "" {
-		uri = "mongodb://db:27017"
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))
-	if err != nil {
-		log.Fatalf("[MongoDB] Failed to connect: %v", err)
-	}
-
-	err = client.Ping(ctx, nil)
-	if err != nil {
-		log.Fatalf("[MongoDB] Failed to ping: %v", err)
-	}
-
-	mongoClient = client
-	mongoDB = client.Database("zeno_bot")
-	log.Println("[MongoDB] Connected successfully")
 }
 
 func handleAskAI(m *telegram.NewMessage) error {
@@ -395,7 +357,7 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 
 	memoriesMap, err := getMemoriesForUsers(ctx, userIDs)
 	if err != nil {
-		log.Printf("[MongoDB] Error loading memories: %v", err)
+		log.Printf("[DB] Error loading memories: %v", err)
 	}
 
 	var memoriesXMLBuilder strings.Builder
@@ -445,7 +407,13 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 		var textFileContent string
 
 		if msg.Media() != nil {
-			err = mongoDB.Collection("uploaded_files").FindOne(ctx, bson.M{"chat_id": chatID, "msg_id": msgID}).Decode(&fileDoc)
+			err = db.Pool.QueryRow(ctx, `
+				SELECT chat_id, msg_id, google_file_uri, mime_type, file_name, uploaded_at, data
+				FROM uploaded_files WHERE chat_id = $1 AND msg_id = $2`,
+				chatID, msgID).Scan(
+				&fileDoc.ChatID, &fileDoc.MsgID, &fileDoc.GoogleFileURI, &fileDoc.MIMEType,
+				&fileDoc.FileName, &fileDoc.UploadedAt, &fileDoc.Data,
+			)
 			if err != nil {
 				log.Printf("[AiChat] File found in msg ID %d but not in DB. Downloading...", msgID)
 				upFile, err := handleFileUpload(ctx, &msg)
@@ -470,7 +438,9 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 		repliedToFileName := ""
 		if msg.ReplyToMsgID() != 0 {
 			var fDoc UploadedFile
-			err = mongoDB.Collection("uploaded_files").FindOne(ctx, bson.M{"chat_id": chatID, "msg_id": msg.ReplyToMsgID()}).Decode(&fDoc)
+			err = db.Pool.QueryRow(ctx, `
+				SELECT file_name FROM uploaded_files WHERE chat_id = $1 AND msg_id = $2`,
+				chatID, msg.ReplyToMsgID()).Scan(&fDoc.FileName)
 			if err == nil {
 				repliedToFileName = fDoc.FileName
 			}
@@ -519,7 +489,13 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 		})
 
 		var toolHist ToolCallHistory
-		err = mongoDB.Collection("tool_history").FindOne(ctx, bson.M{"chat_id": chatID, "msg_id": msgID}).Decode(&toolHist)
+		var toolCallsJSON []byte
+		err = db.Pool.QueryRow(ctx, `
+			SELECT tool_calls FROM tool_history WHERE chat_id = $1 AND msg_id = $2`,
+			chatID, msgID).Scan(&toolCallsJSON)
+		if err == nil {
+			_ = json.Unmarshal(toolCallsJSON, &toolHist.ToolCalls)
+		}
 		if err == nil && len(toolHist.ToolCalls) > 0 {
 			var modelParts []*genai.Part
 			var userParts []*genai.Part
@@ -577,17 +553,18 @@ func handleFileUpload(ctx context.Context, m *telegram.NewMessage) (*UploadedFil
 		Data:       mediaData,
 	}
 
-	coll := mongoDB.Collection("uploaded_files")
-	_, err := coll.InsertOne(ctx, upFile)
+	_, err := db.Pool.Exec(ctx, `
+		INSERT INTO uploaded_files (chat_id, msg_id, google_file_uri, mime_type, file_name, uploaded_at, data)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (chat_id, msg_id) DO UPDATE SET
+			google_file_uri = EXCLUDED.google_file_uri,
+			mime_type = EXCLUDED.mime_type,
+			file_name = EXCLUDED.file_name,
+			uploaded_at = EXCLUDED.uploaded_at,
+			data = EXCLUDED.data`,
+		upFile.ChatID, upFile.MsgID, upFile.GoogleFileURI, upFile.MIMEType, upFile.FileName, upFile.UploadedAt, upFile.Data)
 	if err != nil {
-		insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, err = coll.InsertOne(insertCtx, upFile)
-		insertCancel()
-		if err != nil {
-			log.Printf("[AiChat] Failed to save file mapping to DB after retry: %v", err)
-		} else {
-			log.Printf("[AiChat] Downloaded & Cached: Stored file %s (%s, %d bytes) to DB for msg ID %d (after retry)", fileName, mimeType, len(mediaData), m.ID)
-		}
+		log.Printf("[AiChat] Failed to save file mapping to DB: %v", err)
 	} else {
 		log.Printf("[AiChat] Downloaded & Cached: Stored file %s (%s, %d bytes) to DB for msg ID %d", fileName, mimeType, len(mediaData), m.ID)
 	}
@@ -596,54 +573,60 @@ func handleFileUpload(ctx context.Context, m *telegram.NewMessage) (*UploadedFil
 }
 
 func getMemoriesForUsers(ctx context.Context, userIDs []int64) (map[int64][]Memory, error) {
-	if mongoDB == nil {
-		return nil, fmt.Errorf("MongoDB not initialized")
+	if db.Pool == nil {
+		return nil, fmt.Errorf("database not initialized")
 	}
-	coll := mongoDB.Collection("memories")
+	if len(userIDs) == 0 {
+		return map[int64][]Memory{}, nil
+	}
 
-	filter := bson.M{"user_id": bson.M{"$in": userIDs}}
-	cursor, err := coll.Find(ctx, filter)
+	rows, err := db.Pool.Query(ctx, `
+		SELECT user_id, index, text, updated_at
+		FROM memories
+		WHERE user_id = ANY($1)
+		ORDER BY user_id, index`, userIDs)
 	if err != nil {
 		return nil, err
 	}
-	defer cursor.Close(ctx)
+	defer rows.Close()
 
 	memMap := make(map[int64][]Memory)
-	for cursor.Next(ctx) {
+	for rows.Next() {
 		var mem Memory
-		if err := cursor.Decode(&mem); err != nil {
+		if err := rows.Scan(&mem.UserID, &mem.Index, &mem.Text, &mem.UpdatedAt); err != nil {
 			continue
 		}
 		memMap[mem.UserID] = append(memMap[mem.UserID], mem)
 	}
-	return memMap, nil
+	return memMap, rows.Err()
 }
 
 func saveToolCallHistory(ctx context.Context, chatID int64, msgID int32, name string, args map[string]any, response map[string]any) {
-	if mongoDB == nil {
+	if db.Pool == nil {
 		return
 	}
-	coll := mongoDB.Collection("tool_history")
 
 	argsBytes, _ := json.Marshal(args)
 	respBytes, _ := json.Marshal(response)
 
-	newCall := SavedToolCall{
+	callJSON, err := json.Marshal(SavedToolCall{
 		Name:     name,
 		Args:     string(argsBytes),
 		Response: string(respBytes),
-	}
-
-	filter := bson.M{"chat_id": chatID, "msg_id": msgID}
-	update := bson.M{
-		"$push":        bson.M{"tool_calls": newCall},
-		"$setOnInsert": bson.M{"uploaded_at": time.Now()},
-	}
-
-	opts := options.Update().SetUpsert(true)
-	_, err := coll.UpdateOne(ctx, filter, update, opts)
+	})
 	if err != nil {
-		log.Printf("[MongoDB] Failed to save tool call history: %v", err)
+		log.Printf("[DB] Failed to marshal tool call: %v", err)
+		return
+	}
+
+	_, err = db.Pool.Exec(ctx, `
+		INSERT INTO tool_history (chat_id, msg_id, tool_calls, uploaded_at)
+		VALUES ($1, $2, jsonb_build_array($3::jsonb), NOW())
+		ON CONFLICT (chat_id, msg_id) DO UPDATE
+		SET tool_calls = tool_history.tool_calls || jsonb_build_array($3::jsonb)`,
+		chatID, msgID, string(callJSON))
+	if err != nil {
+		log.Printf("[DB] Failed to save tool call history: %v", err)
 	}
 }
 

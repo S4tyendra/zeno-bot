@@ -15,10 +15,8 @@ import (
 	"github.com/amarnathcjd/gogram/telegram"
 	"google.golang.org/genai"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo/options"
-
 	"zeno/config"
+	"zeno/db"
 )
 
 const GeneratedImagesDir = "/app/generated"
@@ -497,31 +495,23 @@ func executeMemoryManager(args map[string]any) map[string]any {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	coll := mongoDB.Collection("memories")
-
 	switch action {
 	case "add":
 		if text == "" {
 			return map[string]any{"success": false, "error": "text is required to add memory"}
 		}
-		opts := options.FindOne().SetSort(bson.D{{Key: "index", Value: -1}})
-		var lastMem Memory
-		err := coll.FindOne(ctx, bson.M{"user_id": userID}, opts).Decode(&lastMem)
-		nextIndex := 1
-		if err == nil {
-			nextIndex = lastMem.Index + 1
+		var nextIndex int
+		err := db.Pool.QueryRow(ctx, `SELECT COALESCE(MAX(index), 0) + 1 FROM memories WHERE user_id = $1`, userID).Scan(&nextIndex)
+		if err != nil {
+			return map[string]any{"success": false, "error": err.Error()}
 		}
 		if nextIndex > 100 {
 			return map[string]any{"success": false, "error": "memory limit reached (max 100)"}
 		}
 
-		newMem := Memory{
-			UserID:    userID,
-			Index:     nextIndex,
-			Text:      text,
-			UpdatedAt: time.Now(),
-		}
-		_, err = coll.InsertOne(ctx, newMem)
+		_, err = db.Pool.Exec(ctx, `
+			INSERT INTO memories (user_id, index, text, updated_at)
+			VALUES ($1, $2, $3, NOW())`, userID, nextIndex, text)
 		if err != nil {
 			return map[string]any{"success": false, "error": err.Error()}
 		}
@@ -548,11 +538,13 @@ func executeMemoryManager(args map[string]any) map[string]any {
 			return map[string]any{"success": false, "error": "invalid index type"}
 		}
 
-		res, err := coll.UpdateOne(ctx, bson.M{"user_id": userID, "index": index}, bson.M{"$set": bson.M{"text": text, "updated_at": time.Now()}})
+		tag, err := db.Pool.Exec(ctx, `
+			UPDATE memories SET text = $1, updated_at = NOW()
+			WHERE user_id = $2 AND index = $3`, text, userID, index)
 		if err != nil {
 			return map[string]any{"success": false, "error": err.Error()}
 		}
-		if res.MatchedCount == 0 {
+		if tag.RowsAffected() == 0 {
 			return map[string]any{"success": false, "error": fmt.Sprintf("Memory index %d not found for user", index)}
 		}
 		return map[string]any{"success": true, "message": "Memory updated successfully"}
@@ -575,11 +567,11 @@ func executeMemoryManager(args map[string]any) map[string]any {
 			return map[string]any{"success": false, "error": "invalid index type"}
 		}
 
-		res, err := coll.DeleteOne(ctx, bson.M{"user_id": userID, "index": index})
+		tag, err := db.Pool.Exec(ctx, `DELETE FROM memories WHERE user_id = $1 AND index = $2`, userID, index)
 		if err != nil {
 			return map[string]any{"success": false, "error": err.Error()}
 		}
-		if res.DeletedCount == 0 {
+		if tag.RowsAffected() == 0 {
 			return map[string]any{"success": false, "error": fmt.Sprintf("Memory index %d not found for user", index)}
 		}
 		return map[string]any{"success": true, "message": "Memory deleted successfully"}

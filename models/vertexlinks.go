@@ -1,14 +1,12 @@
 package models
 
-import "go.mongodb.org/mongo-driver/bson/primitive"
-
 type VertexLinks struct {
-	ID    primitive.ObjectID `bson:"_id,omitempty"`
-	Links []GroundingLink    `bson:"links"`
-	Sent  bool               `bson:"sent"`
+	ID    string
+	Links []GroundingLink
+	Sent  bool
 }
 
 type GroundingLink struct {
-	Title string `bson:"title"`
-	URI   string `bson:"uri"`
+	Title string `json:"title"`
+	URI   string `json:"uri"`
 }

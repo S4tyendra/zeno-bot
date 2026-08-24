@@ -12,7 +12,11 @@ A modular Telegram bot built with Go.
 2. Edit `.env`:
    ```
    BOT_TOKEN=telegram_bot_token
-   MONGODB_URL=mongodb://localhost:27017
+   DB_HOST=localhost
+   DB_PORT=5432
+   DB_NAME=zeno-bot
+   DB_USER=zeno
+   DB_PASS=
    ```
 
 3. Run the bot:
@@ -75,11 +79,11 @@ package models
 import "time"
 
 type ChatHistory struct {
-    ID        string    `bson:"_id,omitempty"`
-    UserID    int64     `bson:"user_id"`
-    Message   string    `bson:"message"`
-    CreatedAt time.Time `bson:"created_at"`
+    ID        int64
+    UserID    int64
+    Message   string
+    CreatedAt time.Time
 }
 ```
 
-Use in modules with `db.Collection("chat_history")`.
+Use in modules with `db.Pool` (pgx).

@@ -15,9 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo/options"
-
 	"zeno/config"
 	"zeno/db"
 )
@@ -48,7 +45,7 @@ type PerplexitySource struct {
 	Snippet string
 }
 
-// initPerplexity bootstraps JWT: env seed → refresh → store in MongoDB.
+// initPerplexity bootstraps JWT: env seed → refresh → store in Postgres.
 // On subsequent runs, DB JWT is used directly (env is just the bootstrap seed).
 func initPerplexity() {
 	// Try loading from DB first (already bootstrapped in a previous run)
@@ -174,10 +171,9 @@ func loadJWTFromDB() (string, error) {
 	defer cancel()
 
 	var doc struct {
-		JWT string `bson:"jwt"`
+		JWT string `json:"jwt"`
 	}
-	err := db.Collection("system_settings").FindOne(ctx, bson.M{"_id": "perplexity_jwt"}).Decode(&doc)
-	if err != nil {
+	if err := db.GetSetting(ctx, "perplexity_jwt", &doc); err != nil {
 		return "", err
 	}
 	return doc.JWT, nil
@@ -187,13 +183,10 @@ func storeJWTInDB(jwt string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := db.Collection("system_settings").UpdateOne(
-		ctx,
-		bson.M{"_id": "perplexity_jwt"},
-		bson.M{"$set": bson.M{"jwt": jwt, "updated_at": time.Now()}},
-		options.Update().SetUpsert(true),
-	)
-	return err
+	return db.SetSetting(ctx, "perplexity_jwt", map[string]any{
+		"jwt":        jwt,
+		"updated_at": time.Now(),
+	})
 }
 
 // ── Search API ──────────────────────────────────────────────────────

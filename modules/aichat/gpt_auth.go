@@ -13,25 +13,22 @@ import (
 	"sync"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo/options"
-
 	"zeno/db"
 )
 
 const (
 	gptClientID   = "app_EMoamEEZ73f0CkXaXp7hrann"
 	gptRefreshURL = "https://auth.openai.com/oauth/token"
-	gptMongoID    = "gpt_auth"
+	gptAuthID     = "gpt_auth"
 )
 
 type gptTokenDoc struct {
-	ID           string `bson:"_id"`
-	AccessToken  string `bson:"access_token"`
-	RefreshToken string `bson:"refresh_token"`
-	IDToken      string `bson:"id_token"`
-	AccountID    string `bson:"account_id"`
-	LastRefresh  time.Time `bson:"last_refresh"`
+	ID           string
+	AccessToken  string
+	RefreshToken string
+	IDToken      string
+	AccountID    string
+	LastRefresh  time.Time
 }
 
 var (
@@ -54,16 +51,20 @@ func GetGPTAuth() (*gptTokenDoc, error) {
 	return cached, nil
 }
 
-// loadGPTAuth loads from MongoDB; if absent, seeds from env and writes to DB.
+// loadGPTAuth loads from Postgres; if absent, seeds from env and writes to DB.
 func loadGPTAuth() (*gptTokenDoc, error) {
-	col := db.Collection("gpt_auth")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	var doc gptTokenDoc
-	err := col.FindOne(ctx, bson.M{"_id": gptMongoID}).Decode(&doc)
+	doc.ID = gptAuthID
+	err := db.Pool.QueryRow(ctx, `
+		SELECT access_token, refresh_token, id_token, account_id, last_refresh
+		FROM gpt_auth WHERE id = $1`, gptAuthID).Scan(
+		&doc.AccessToken, &doc.RefreshToken, &doc.IDToken, &doc.AccountID, &doc.LastRefresh,
+	)
 	if err == nil {
-		log.Println("[GPT Auth] Loaded tokens from MongoDB")
+		log.Println("[GPT Auth] Loaded tokens from Postgres")
 		// Check if stale
 		if time.Since(doc.LastRefresh) > 58*time.Minute {
 			return refreshGPTToken(&doc)
@@ -98,7 +99,7 @@ func seedGPTAuthFromEnv() (gptTokenDoc, error) {
 	if idToken != "" && refreshToken != "" && accountID != "" {
 		log.Println("[GPT Auth] Seeding from env vars")
 		doc := gptTokenDoc{
-			ID:           gptMongoID,
+			ID:           gptAuthID,
 			IDToken:      idToken,
 			RefreshToken: refreshToken,
 			AccountID:    accountID,
@@ -126,7 +127,7 @@ func seedGPTAuthFromEnv() (gptTokenDoc, error) {
 	lastRef, _ := time.Parse("2006-01-02T15:04:05.000Z", strings.ReplaceAll(lastRefStr, "+00:00", "Z"))
 
 	return gptTokenDoc{
-		ID:           gptMongoID,
+		ID:           gptAuthID,
 		AccessToken:  asStr(tokens["access_token"]),
 		RefreshToken: asStr(tokens["refresh_token"]),
 		IDToken:      asStr(tokens["id_token"]),
@@ -162,16 +163,15 @@ func isRefreshTokenReused(err error) bool {
 	return strings.Contains(err.Error(), "refresh_token_reused")
 }
 
-// purgeGPTAuthFromDB deletes the stored GPT auth document from MongoDB.
+// purgeGPTAuthFromDB deletes the stored GPT auth row from Postgres.
 func purgeGPTAuthFromDB() {
-	col := db.Collection("gpt_auth")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := col.DeleteOne(ctx, bson.M{"_id": gptMongoID})
+	_, err := db.Pool.Exec(ctx, `DELETE FROM gpt_auth WHERE id = $1`, gptAuthID)
 	if err != nil {
 		log.Printf("[GPT Auth] Failed to purge DB record: %v", err)
 	} else {
-		log.Println("[GPT Auth] Purged stale token record from MongoDB")
+		log.Println("[GPT Auth] Purged stale token record from Postgres")
 	}
 }
 
@@ -211,19 +211,23 @@ func refreshGPTTokenRaw(doc gptTokenDoc) (gptTokenDoc, error) {
 }
 
 func saveGPTAuthToDB(doc *gptTokenDoc) {
-	col := db.Collection("gpt_auth")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := col.UpdateOne(ctx,
-		bson.M{"_id": gptMongoID},
-		bson.M{"$set": doc},
-		options.Update().SetUpsert(true),
-	)
+	_, err := db.Pool.Exec(ctx, `
+		INSERT INTO gpt_auth (id, access_token, refresh_token, id_token, account_id, last_refresh)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (id) DO UPDATE SET
+			access_token = EXCLUDED.access_token,
+			refresh_token = EXCLUDED.refresh_token,
+			id_token = EXCLUDED.id_token,
+			account_id = EXCLUDED.account_id,
+			last_refresh = EXCLUDED.last_refresh`,
+		gptAuthID, doc.AccessToken, doc.RefreshToken, doc.IDToken, doc.AccountID, doc.LastRefresh)
 	if err != nil {
 		log.Printf("[GPT Auth] Failed to save to DB: %v", err)
 	} else {
-		log.Println("[GPT Auth] Saved tokens to MongoDB")
+		log.Println("[GPT Auth] Saved tokens to Postgres")
 	}
 }
 
