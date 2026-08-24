@@ -9,13 +9,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"zeno/db"
 )
 
 var (
-	ArtifactPort string
-	ServerIP     string
+	ArtifactPort    string
+	ArtifactBaseURL string
+	ServerIP        string
 )
 
 func init() {
@@ -23,6 +25,7 @@ func init() {
 	if ArtifactPort == "" {
 		ArtifactPort = "8080"
 	}
+	ArtifactBaseURL = os.Getenv("ARTIFACT_BASE_URL")
 	ServerIP = getOutboundIP()
 }
 
@@ -37,10 +40,22 @@ func getOutboundIP() string {
 	return localAddr.IP.String()
 }
 
+// GetArtifactURL returns the clean URL for a given artifact ID.
+func GetArtifactURL(artifactID string) string {
+	if ArtifactBaseURL != "" {
+		return fmt.Sprintf("%s/%s", strings.TrimRight(ArtifactBaseURL, "/"), artifactID)
+	}
+	return fmt.Sprintf("http://%s:%s/%s", ServerIP, ArtifactPort, artifactID)
+}
+
 func StartServer() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		artifactID := r.URL.Query().Get("artifact")
 		if artifactID == "" {
+			artifactID = strings.Trim(r.URL.Path, "/")
+		}
+
+		if artifactID == "" || artifactID == "favicon.ico" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}

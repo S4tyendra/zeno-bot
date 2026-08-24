@@ -52,19 +52,17 @@ func handleLogs(m *telegram.NewMessage) error {
 
 	log.Printf("[Admin] /logs requested by %d, lines=%s", m.SenderID(), lines)
 
-	cmd := exec.Command("journalctl", "-u", "zeno", "-n", lines, "--no-pager")
+	cli := aichat.ContainerCLI()
+	// Primary: nerdctl logs with explicit containerd address + namespace
+	cmd := exec.Command(cli, "--address", "/run/containerd/containerd.sock", "--namespace", "default", "logs", "--tail", lines, "zeno-bot")
 	out, err := cmd.CombinedOutput()
-
 	if err != nil {
-		cmd = exec.Command(aichat.ContainerCLI(), "logs", "--tail", lines, "zeno-bot")
+		// Fallback: without explicit flags (picks up CONTAINERD_ADDRESS env var)
+		cmd = exec.Command(cli, "logs", "--tail", lines, "zeno-bot")
 		out, err = cmd.CombinedOutput()
 		if err != nil {
-			cmd = exec.Command("tail", "-n", lines, "/tmp/zeno.log")
-			out, err = cmd.CombinedOutput()
-			if err != nil {
-				m.Reply(fmt.Sprintf("❌ Failed to fetch logs: `%v`", err), &telegram.SendOptions{ParseMode: "Markdown"})
-				return nil
-			}
+			m.Reply(fmt.Sprintf("❌ Failed to fetch logs: `%v`\n```\n%s\n```", err, strings.TrimSpace(string(out))), &telegram.SendOptions{ParseMode: "Markdown"})
+			return nil
 		}
 	}
 
@@ -229,7 +227,7 @@ func handleSudoers(m *telegram.NewMessage) error {
 	chatID := m.ChatID()
 	
 	if action == "add" {
-		_, err := db.Pool.Exec(context.Background(), `INSERT INTO startup_chats (chat_id, added_at) VALUES ($1, NOW()) ON CONFLICT DO NOTHING`, chatID)
+		_, err := db.Pool.Exec(context.Background(), `INSERT INTO startup_chats (chat_id) VALUES ($1) ON CONFLICT DO NOTHING`, chatID)
 		if err != nil {
 			m.Reply(fmt.Sprintf("❌ DB error: %v", err))
 			return nil

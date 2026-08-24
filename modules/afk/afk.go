@@ -11,8 +11,6 @@ import (
 	"unicode/utf16"
 
 	"github.com/amarnathcjd/gogram/telegram"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"zeno/db"
 	"zeno/models"
@@ -30,23 +28,25 @@ func Register(client *telegram.Client) {
 	client.On("message", handleMessage)
 }
 
-// LoadAFKCache fetches all active AFK users from MongoDB and stores them in the in-memory cache.
+// LoadAFKCache fetches all active AFK users from PostgreSQL and stores them in the in-memory cache.
 func LoadAFKCache() {
-	col := db.Collection("afk")
+	if db.Pool == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cursor, err := col.Find(ctx, bson.M{})
+	rows, err := db.Pool.Query(ctx, `SELECT user_id, username, afk_time, reason FROM afk`)
 	if err != nil {
 		log.Printf("[AFK] Failed to load AFK cache: %v", err)
 		return
 	}
-	defer cursor.Close(ctx)
+	defer rows.Close()
 
 	count := 0
-	for cursor.Next(ctx) {
+	for rows.Next() {
 		var state models.AFKState
-		if err := cursor.Decode(&state); err == nil {
+		if err := rows.Scan(&state.UserID, &state.Username, &state.AFKTime, &state.Reason); err == nil {
 			afkCache.Store(state.UserID, true)
 			if state.Username != "" {
 				afkUsernamesCache.Store(strings.ToLower(state.Username), state.UserID)
@@ -69,7 +69,9 @@ func handleAFK(m *telegram.NewMessage) error {
 	}
 
 	reason := strings.TrimSpace(m.Args())
-	col := db.Collection("afk")
+	if db.Pool == nil {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -80,8 +82,14 @@ func handleAFK(m *telegram.NewMessage) error {
 		Reason:   reason,
 	}
 
-	opts := options.Replace().SetUpsert(true)
-	_, err := col.ReplaceOne(ctx, bson.M{"_id": userID}, state, opts)
+	_, err := db.Pool.Exec(ctx, `
+		INSERT INTO afk (user_id, username, afk_time, reason)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (user_id) DO UPDATE SET
+			username = EXCLUDED.username,
+			afk_time = EXCLUDED.afk_time,
+			reason = EXCLUDED.reason`,
+		state.UserID, state.Username, state.AFKTime, state.Reason)
 	if err != nil {
 		log.Printf("[AFK] Failed to save AFK state for %d: %v", userID, err)
 		m.Reply("❌ Failed to set AFK status.")
@@ -119,7 +127,9 @@ func handleMessage(m *telegram.NewMessage) error {
 		return nil
 	}
 
-	col := db.Collection("afk")
+	if db.Pool == nil {
+		return nil
+	}
 
 	// Map to keep track of users we've notified in this message to prevent duplicate replies
 	notified := make(map[int64]bool)
@@ -130,9 +140,9 @@ func handleMessage(m *telegram.NewMessage) error {
 		defer cancel()
 
 		var senderAFK models.AFKState
-		err := col.FindOne(ctx, bson.M{"_id": userID}).Decode(&senderAFK)
+		err := db.Pool.QueryRow(ctx, `SELECT user_id, username, afk_time, reason FROM afk WHERE user_id = $1`, userID).Scan(&senderAFK.UserID, &senderAFK.Username, &senderAFK.AFKTime, &senderAFK.Reason)
 		if err == nil {
-			_, deleteErr := col.DeleteOne(ctx, bson.M{"_id": userID})
+			_, deleteErr := db.Pool.Exec(ctx, `DELETE FROM afk WHERE user_id = $1`, userID)
 			if deleteErr == nil {
 				// Remove from in-memory cache
 				afkCache.Delete(userID)
@@ -162,7 +172,7 @@ func handleMessage(m *telegram.NewMessage) error {
 					defer cancel()
 
 					var targetAFK models.AFKState
-					err := col.FindOne(ctx, bson.M{"_id": repliedSenderID}).Decode(&targetAFK)
+					err := db.Pool.QueryRow(ctx, `SELECT user_id, username, afk_time, reason FROM afk WHERE user_id = $1`, repliedSenderID).Scan(&targetAFK.UserID, &targetAFK.Username, &targetAFK.AFKTime, &targetAFK.Reason)
 					if err == nil {
 						notified[repliedSenderID] = true // Mark as notified so mention checking doesn't duplicate
 
@@ -212,7 +222,7 @@ func handleMessage(m *telegram.NewMessage) error {
 					defer cancel()
 
 					var targetAFK models.AFKState
-					err := col.FindOne(ctx, bson.M{"_id": targetID}).Decode(&targetAFK)
+					err := db.Pool.QueryRow(ctx, `SELECT user_id, username, afk_time, reason FROM afk WHERE user_id = $1`, targetID).Scan(&targetAFK.UserID, &targetAFK.Username, &targetAFK.AFKTime, &targetAFK.Reason)
 					if err == nil {
 						if targetName == "User" || targetName == "" {
 							u, err := m.Client.GetUser(targetID)

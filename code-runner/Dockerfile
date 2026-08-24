@@ -3,7 +3,8 @@ FROM alpine:3.20
 # Install only essential tools (Alpine uses apk)
 RUN apk add --no-cache \
     curl \
-    jq
+    jq \
+    bash
 
 # Install standalone uv (doesn't need system python)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh

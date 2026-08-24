@@ -1,27 +1,28 @@
 services:
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: satyendraxd/zeno-bot:latest
     container_name: zeno-bot
     restart: unless-stopped
+    ports:
+      - "13001:8080"
     env_file:
       - .env
     environment:
       - CODE_RUNNER_CONTAINER=zeno-code-runner
+      - CONTAINERD_ADDRESS=/run/containerd/containerd.sock
+      - CONTAINERD_NAMESPACE=default
     volumes:
       - ./session.dat:/app/session.dat
       - generated_images:/app/generated
       - workspace:/workspace # Same path as code-runner
       - /var/run/docker.sock:/var/run/docker.sock
+      - /run/containerd/containerd.sock:/run/containerd/containerd.sock
     depends_on:
       code-runner:
         condition: service_started
 
   code-runner:
-    build:
-      context: ./code-runner
-      dockerfile: Dockerfile
+    image: satyendraxd/zeno-code-runner:latest
     container_name: zeno-code-runner
     restart: unless-stopped
     volumes:

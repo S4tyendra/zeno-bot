@@ -589,13 +589,10 @@ func executePublishArtifact(args map[string]any) map[string]any {
 		return map[string]any{"success": false, "error": "db insert failed"}
 	}
 	
-	port := os.Getenv("ARTIFACT_PORT")
-	if port == "" { port = "8080" }
-	
-	url := fmt.Sprintf("http://%s:%s/?artifact=%s", artifacts.ServerIP, port, artifactID)
+	url := artifacts.GetArtifactURL(artifactID)
 	return map[string]any{
-		"success": true,
-		"url": url,
+		"success":     true,
+		"url":         url,
 		"artifact_id": artifactID,
 	}
 }

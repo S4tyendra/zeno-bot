@@ -84,7 +84,13 @@ var schemaStatements = []string{
 	)`,
 	`CREATE TABLE IF NOT EXISTS startup_chats (
 		chat_id BIGINT PRIMARY KEY,
-		label TEXT
+		added_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE TABLE IF NOT EXISTS afk (
+		user_id BIGINT PRIMARY KEY,
+		username TEXT NOT NULL DEFAULT '',
+		afk_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		reason TEXT NOT NULL DEFAULT ''
 	)`,
 }
 

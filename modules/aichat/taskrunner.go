@@ -36,7 +36,7 @@ func RunTaskAsync(language, code string, chatID int64, msgID int32) map[string]a
 	case "python":
 		cmdArgs = []string{cli, "exec", containerName, "python3", "-c", code}
 	case "bash":
-		cmdArgs = []string{cli, "exec", containerName, "bash", "-c", code}
+		cmdArgs = []string{cli, "exec", containerName, "sh", "-c", code}
 	}
 
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
