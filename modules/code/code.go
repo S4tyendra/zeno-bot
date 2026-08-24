@@ -16,8 +16,6 @@ import (
 )
 
 var langMap = map[string]string{
-	"js":         "javascript",
-	"javascript": "javascript",
 	"py":         "python",
 	"python":     "python",
 	"sh":         "bash",
@@ -75,7 +73,7 @@ func handleCode(m *telegram.NewMessage) error {
 
 	lang := langMap[strings.ToLower(langWord)]
 	if lang == "" {
-		m.Reply("❌ Invalid language. Supported: `js`/`javascript`, `py`/`python`, `sh`/`bash`", &telegram.SendOptions{ParseMode: "Markdown"})
+		m.Reply("❌ Invalid language. Supported: `py`/`python`, `sh`/`bash`", &telegram.SendOptions{ParseMode: "Markdown"})
 		return nil
 	}
 
@@ -90,14 +88,13 @@ func handleCode(m *telegram.NewMessage) error {
 		containerName = "zeno-code-runner"
 	}
 
+	cli := aichat.ContainerCLI()
 	var cmdArgs []string
 	switch lang {
 	case "python":
-		cmdArgs = []string{"docker", "exec", containerName, "python3", "-c", codeText}
+		cmdArgs = []string{cli, "exec", containerName, "python3", "-c", codeText}
 	case "bash":
-		cmdArgs = []string{"docker", "exec", containerName, "bash", "-c", codeText}
-	case "javascript":
-		cmdArgs = []string{"docker", "exec", containerName, "bun", "-e", codeText}
+		cmdArgs = []string{cli, "exec", containerName, "bash", "-c", codeText}
 	}
 
 	log.Printf("[CodeRunner] Running manual code (%s) for user %d", lang, m.SenderID())
@@ -176,9 +173,9 @@ func sendResponse(m *telegram.NewMessage, text string) error {
 
 func sendUsage(m *telegram.NewMessage) {
 	usage := "📖 **Usage:**\n\n" +
-		"**/code {js/py/sh}**\n" +
+		"**/code {py/sh}**\n" +
 		"**{code goes here}**\n\n" +
 		"_Or reply to a message containing code with:_\n" +
-		"**/code {js/py/sh}**"
+		"**/code {py/sh}**"
 	m.Reply(usage, &telegram.SendOptions{ParseMode: "Markdown"})
 }

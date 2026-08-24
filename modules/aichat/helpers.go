@@ -122,10 +122,18 @@ func fetchTelegramHistory(chatID int64, currentMsgID int32, excludeReplyID int32
 		return nil
 	}
 
-	messages, err := botClient.GetMessages(chatID, &telegram.SearchOption{IDs: ids})
-	if err != nil {
-		log.Printf("[AiChat] GetMessages error: %v", err)
-		return nil
+	var messages []telegram.NewMessage
+	for i := 0; i < len(ids); i += 200 {
+		end := i + 200
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk, err := botClient.GetMessages(chatID, &telegram.SearchOption{IDs: ids[i:end]})
+		if err != nil {
+			log.Printf("[AiChat] GetMessages error in chunk: %v", err)
+			continue
+		}
+		messages = append(messages, chunk...)
 	}
 
 	var result []telegram.NewMessage

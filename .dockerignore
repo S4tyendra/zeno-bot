@@ -1,8 +1,2 @@
-.git
-.claude
-.env
-dist
-*.db
-session.dat
-node_modules
-*.log
+*
+!dist/zeno

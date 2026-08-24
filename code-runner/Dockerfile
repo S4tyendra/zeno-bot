@@ -1,35 +1,29 @@
-FROM debian:bookworm-slim
+FROM alpine:3.20
 
-# Install Python, Node/Bun, and common tools
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-pip \
-    python3-venv \
+# Install only essential tools (Alpine uses apk)
+RUN apk add --no-cache \
     curl \
-    unzip \
-    ca-certificates \
-    imagemagick \
-    ffmpeg \
-    jq \
-    && rm -rf /var/lib/apt/lists/*
+    jq
 
-# Install Bun
-RUN curl -fsSL https://bun.sh/install | bash
-ENV PATH="/root/.bun/bin:$PATH"
-
-# Install common Python packages
-RUN pip3 install --break-system-packages \
-    pillow \
-    numpy \
-    requests \
-    httpx \
-    colorthief \
-    opencv-python-headless \
-    MultiFeatures \
-    yt-dlp
+# Install standalone uv (doesn't need system python)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
 
 # Create directories
 RUN mkdir -p /workspace /generated /scripts
+
+# uv will automatically download a lightweight Python 3.12 build
+RUN uv venv --python 3.12 /workspace/.venv
+ENV VIRTUAL_ENV=/workspace/.venv
+ENV PATH="/workspace/.venv/bin:$PATH"
+# Alpine uses ash/sh instead of bash by default, but this syntax still works
+RUN echo "source /workspace/.venv/bin/activate" > /etc/profile.d/venv.sh
+
+# Install minimal Python packages
+RUN uv pip install \
+    requests \
+    httpx \
+    yt-dlp
 
 # Add helper scripts
 COPY scripts/ /scripts/

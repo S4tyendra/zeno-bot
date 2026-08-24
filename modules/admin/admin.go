@@ -1,11 +1,14 @@
 package admin
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os/exec"
 	"strings"
 
+	"zeno/config"
+	"zeno/db"
 	"zeno/modules/aichat"
 
 	"github.com/amarnathcjd/gogram/telegram"
@@ -30,6 +33,9 @@ func Register(client *telegram.Client) {
 	client.On("cmd:logs", handleLogs)
 	client.On("cmd:allowai", handleAllowAI)
 	client.On("cmd:noallowai", handleNoAllowAI)
+	client.On("cmd:setmodel", handleSetModel)
+	client.On("cmd:getmodel", handleGetModel)
+	client.On("cmd:sudoers", handleSudoers)
 }
 
 func handleLogs(m *telegram.NewMessage) error {
@@ -50,7 +56,7 @@ func handleLogs(m *telegram.NewMessage) error {
 	out, err := cmd.CombinedOutput()
 
 	if err != nil {
-		cmd = exec.Command("docker", "logs", "--tail", lines, "zeno-bot")
+		cmd = exec.Command(aichat.ContainerCLI(), "logs", "--tail", lines, "zeno-bot")
 		out, err = cmd.CombinedOutput()
 		if err != nil {
 			cmd = exec.Command("tail", "-n", lines, "/tmp/zeno.log")
@@ -159,5 +165,85 @@ func handleNoAllowAI(m *telegram.NewMessage) error {
 	aichat.RemoveAllow(chatID)
 	log.Printf("[Admin] /noallowai revoked CHAT %d by %d", chatID, m.SenderID())
 	m.Reply("🚫 This group's AI access has been revoked.")
+	return nil
+}
+
+func handleSetModel(m *telegram.NewMessage) error {
+	if !isAdmin(m) {
+		m.Reply("🚫 Not authorized.")
+		return nil
+	}
+	args := strings.Fields(m.Args())
+	if len(args) < 2 {
+		m.Reply("ℹ️ Usage: `/setmodel <default|image|highimage> <model_name>`", &telegram.SendOptions{ParseMode: "Markdown"})
+		return nil
+	}
+	key := args[0]
+	modelName := args[1]
+	
+	switch strings.ToLower(key) {
+	case "default", "image", "highimage":
+	default:
+		m.Reply("❌ Invalid model key. Use `default`, `image`, or `highimage`.", &telegram.SendOptions{ParseMode: "Markdown"})
+		return nil
+	}
+	
+	err := db.SetRuntimeModel(key, modelName)
+	if err != nil {
+		m.Reply(fmt.Sprintf("❌ Failed to save model: %v", err))
+		return nil
+	}
+	
+	m.Reply(fmt.Sprintf("✅ Model `%s` updated to `%s`", key, modelName), &telegram.SendOptions{ParseMode: "Markdown"})
+	return nil
+}
+
+func handleGetModel(m *telegram.NewMessage) error {
+	if !isAdmin(m) {
+		m.Reply("🚫 Not authorized.")
+		return nil
+	}
+	
+	def := db.GetRuntimeModel("default", config.DefaultModel)
+	img := db.GetRuntimeModel("image", config.ImageModel)
+	himg := db.GetRuntimeModel("highimage", config.HighImageModel)
+	
+	msg := fmt.Sprintf("🤖 **Current Models**\n\nDefault: `%s`\nImage: `%s`\nHighImage: `%s`", def, img, himg)
+	m.Reply(msg, &telegram.SendOptions{ParseMode: "Markdown"})
+	return nil
+}
+
+func handleSudoers(m *telegram.NewMessage) error {
+	if !isAdmin(m) {
+		m.Reply("🚫 Not authorized.")
+		return nil
+	}
+	
+	args := strings.Fields(m.Args())
+	if len(args) == 0 {
+		m.Reply("ℹ️ Usage: `/sudoers add|remove` (adds/removes current chat for startup/shutdown messages)", &telegram.SendOptions{ParseMode: "Markdown"})
+		return nil
+	}
+	
+	action := strings.ToLower(args[0])
+	chatID := m.ChatID()
+	
+	if action == "add" {
+		_, err := db.Pool.Exec(context.Background(), `INSERT INTO startup_chats (chat_id, added_at) VALUES ($1, NOW()) ON CONFLICT DO NOTHING`, chatID)
+		if err != nil {
+			m.Reply(fmt.Sprintf("❌ DB error: %v", err))
+			return nil
+		}
+		m.Reply("✅ Current chat added to startup/shutdown broadcast list.")
+	} else if action == "remove" {
+		_, err := db.Pool.Exec(context.Background(), `DELETE FROM startup_chats WHERE chat_id = $1`, chatID)
+		if err != nil {
+			m.Reply(fmt.Sprintf("❌ DB error: %v", err))
+			return nil
+		}
+		m.Reply("✅ Current chat removed from startup/shutdown broadcast list.")
+	} else {
+		m.Reply("❌ Invalid action. Use `add` or `remove`.", &telegram.SendOptions{ParseMode: "Markdown"})
+	}
 	return nil
 }

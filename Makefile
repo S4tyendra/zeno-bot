@@ -8,7 +8,7 @@ all: build
 
 build:
 	go mod tidy
-	go build -o $(DIST)/$(BINARY) .
+	CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s" -o $(DIST)/$(BINARY) .
 
 buildtest: build
 	./$(DIST)/$(BINARY)

@@ -720,7 +720,7 @@ func processWithFunctionCalling(contents []*genai.Content, chatID int64, current
 		var genErr error
 		maxRetries := 5
 		for attempt := 0; attempt <= maxRetries; attempt++ {
-			resp, genErr = genaiClient.Models.GenerateContent(ctx, config.DefaultModel, contents, configAI)
+			resp, genErr = genaiClient.Models.GenerateContent(ctx, db.GetRuntimeModel("default", config.DefaultModel), contents, configAI)
 			if genErr == nil {
 				break
 			}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -63,6 +65,26 @@ var schemaStatements = []string{
 		tool_calls JSONB NOT NULL DEFAULT '[]'::jsonb,
 		uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		PRIMARY KEY (chat_id, msg_id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS tasks (
+		task_id TEXT PRIMARY KEY,
+		chat_id BIGINT NOT NULL,
+		msg_id INTEGER NOT NULL,
+		command TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'running',
+		log_path TEXT NOT NULL,
+		started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		finished_at TIMESTAMPTZ
+	)`,
+	`CREATE TABLE IF NOT EXISTS artifacts (
+		artifact_id TEXT PRIMARY KEY,
+		file_path TEXT NOT NULL,
+		mime_type TEXT NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE TABLE IF NOT EXISTS startup_chats (
+		chat_id BIGINT PRIMARY KEY,
+		label TEXT
 	)`,
 }
 
@@ -130,5 +152,38 @@ func SetSetting(ctx context.Context, key string, value any) error {
 		VALUES ($1, $2::jsonb, NOW())
 		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
 		key, string(raw))
+	return err
+}
+
+var modelCache sync.Map
+
+type cacheEntry struct {
+	val string
+	exp time.Time
+}
+
+func GetRuntimeModel(key, fallback string) string {
+	if entry, ok := modelCache.Load(key); ok {
+		ce := entry.(cacheEntry)
+		if time.Now().Before(ce.exp) {
+			return ce.val
+		}
+	}
+
+	var dbVal string
+	err := Pool.QueryRow(context.Background(), `SELECT value->>'model' FROM system_settings WHERE key = $1`, "model_"+strings.ToLower(key)).Scan(&dbVal)
+	if err != nil || dbVal == "" {
+		dbVal = fallback
+	}
+
+	modelCache.Store(key, cacheEntry{val: dbVal, exp: time.Now().Add(30 * time.Second)})
+	return dbVal
+}
+
+func SetRuntimeModel(key, model string) error {
+	err := SetSetting(context.Background(), "model_"+strings.ToLower(key), map[string]string{"model": model})
+	if err == nil {
+		modelCache.Store(key, cacheEntry{val: model, exp: time.Now().Add(30 * time.Second)})
+	}
 	return err
 }

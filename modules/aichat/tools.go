@@ -1,11 +1,12 @@
 package aichat
 
 import (
-	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 
 	"zeno/config"
 	"zeno/db"
+	"zeno/modules/artifacts"
 )
 
 const GeneratedImagesDir = "/app/generated"
@@ -71,8 +73,9 @@ func init() {
 		"properties": {
 			"language": {
 				"type": "string",
-				"description": "Programming language: python, bash, or javascript",
-				"enum": ["python", "bash", "javascript"]
+				"description": "Programming language: python or bash. Default: bash",
+				"enum": ["python", "bash"],
+				"default": "bash"
 			},
 			"code": {
 				"type": "string",
@@ -180,6 +183,53 @@ func init() {
 		"required": ["chat_id", "text"]
 	}`), &sendToChatParams)
 
+	var listTasksParams genai.Schema
+	json.Unmarshal([]byte(`{
+		"type": "object",
+		"properties": {},
+		"description": "List currently running and recently completed async code tasks."
+	}`), &listTasksParams)
+
+	var readTaskLogParams genai.Schema
+	json.Unmarshal([]byte(`{
+		"type": "object",
+		"properties": {
+			"task_id": {
+				"type": "string",
+				"description": "The task ID to read logs for."
+			},
+			"lines": {
+				"type": "integer",
+				"description": "Number of lines to tail from the end of the log. Default 50."
+			}
+		},
+		"required": ["task_id"]
+	}`), &readTaskLogParams)
+
+	var viewFileParams genai.Schema
+	json.Unmarshal([]byte(`{
+		"type": "object",
+		"properties": {
+			"file_path": {
+				"type": "string",
+				"description": "Absolute path to the file to read"
+			}
+		},
+		"required": ["file_path"]
+	}`), &viewFileParams)
+
+	var publishArtifactParams genai.Schema
+	json.Unmarshal([]byte(`{
+		"type": "object",
+		"properties": {
+			"file_path": {
+				"type": "string",
+				"description": "Absolute path to the file to publish"
+			}
+		},
+		"required": ["file_path"]
+	}`), &publishArtifactParams)
+
 	aiTools = []*genai.Tool{
 		{
 			FunctionDeclarations: []*genai.FunctionDeclaration{
@@ -195,7 +245,7 @@ func init() {
 				},
 				{
 					Name:        "run_code",
-					Description: "Execute code in a sandboxed container. Has access to /generated (images) and /workspace. Available: python, bash, javascript (bun). Output is truncated safely.",
+					Description: "Execute code in a sandboxed container (computer). Has access to /generated (images) and /workspace. Available: python, bash. Output is truncated safely.",
 					Parameters:  &runCodeParams,
 				},
 				{
@@ -223,6 +273,26 @@ func init() {
 					Description: "Directly dispatch a text message to any accessible Telegram chat by ID.",
 					Parameters:  &sendToChatParams,
 				},
+				{
+					Name:        "list_tasks",
+					Description: "List running and recently completed async code tasks.",
+					Parameters:  &listTasksParams,
+				},
+				{
+					Name:        "read_task_log",
+					Description: "Read the output log of an async task by its ID.",
+					Parameters:  &readTaskLogParams,
+				},
+				{
+					Name:        "view_file",
+					Description: "Read any local file and inject it into AI context. Images/audio/PDF → Gemini inline blob. Text/code files → plain text. Any path allowed.",
+					Parameters:  &viewFileParams,
+				},
+				{
+					Name:        "publish_artifact",
+					Description: "Publish a local file as an HTTP artifact to share with the user.",
+					Parameters:  &publishArtifactParams,
+				},
 			},
 		},
 	}
@@ -237,7 +307,15 @@ func executeFunctionCall(fc *genai.FunctionCall, chatID int64, replyToMsgID int3
 	case "send_file":
 		return executeSendFile(fc.Args, chatID, replyToMsgID)
 	case "run_code":
-		return executeRunCode(fc.Args)
+		return executeRunCode(fc.Args, chatID, replyToMsgID)
+	case "list_tasks":
+		return executeListTasks()
+	case "read_task_log":
+		return executeReadTaskLog(fc.Args)
+	case "view_file":
+		return executeViewFile(fc.Args)
+	case "publish_artifact":
+		return executePublishArtifact(fc.Args)
 	case "get_latest_data":
 		return executeGetLatestData(fc.Args)
 	case "memory_manager":
@@ -269,9 +347,9 @@ func executeCreateImage(args map[string]any) map[string]any {
 		aspectRatio = ""
 	}
 
-	model := config.ImageModel
+	model := db.GetRuntimeModel("image", config.ImageModel)
 	if highQuality {
-		model = config.HighImageModel
+		model = db.GetRuntimeModel("highimage", config.HighImageModel)
 	}
 
 	log.Printf("[AiChat] Generating image with model %s (high=%v, aspect=%s): %s", model, highQuality, aspectRatio, prompt)
@@ -373,7 +451,7 @@ func executeSendFile(args map[string]any, chatID int64, replyToMsgID int32) map[
 	return map[string]any{"success": true, "message": "File sent successfully"}
 }
 
-func executeRunCode(args map[string]any) map[string]any {
+func executeRunCode(args map[string]any, chatID int64, replyToMsgID int32) map[string]any {
 	language, _ := args["language"].(string)
 	code, _ := args["code"].(string)
 
@@ -381,55 +459,145 @@ func executeRunCode(args map[string]any) map[string]any {
 		return map[string]any{"success": false, "error": "language and code are required"}
 	}
 
-	validLanguages := map[string]bool{"python": true, "bash": true, "javascript": true}
+	validLanguages := map[string]bool{"python": true, "bash": true}
 	if !validLanguages[language] {
-		return map[string]any{"success": false, "error": "Invalid language. Use: python, bash, or javascript"}
+		return map[string]any{"success": false, "error": "Invalid language. Use: python or bash"}
 	}
 
-	containerName := os.Getenv("CODE_RUNNER_CONTAINER")
-	if containerName == "" {
-		containerName = "zeno-code-runner"
-	}
+	return RunTaskAsync(language, code, chatID, replyToMsgID)
+}
 
-	var cmdArgs []string
-	switch language {
-	case "python":
-		cmdArgs = []string{"docker", "exec", containerName, "python3", "-c", code}
-	case "bash":
-		cmdArgs = []string{"docker", "exec", containerName, "bash", "-c", code}
-	case "javascript":
-		cmdArgs = []string{"docker", "exec", containerName, "bun", "-e", code}
-	}
-
-	log.Printf("[AiChat] Running code (%s): %s", language, truncateString(code, 100))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	output := stdout.String()
-	errOutput := stderr.String()
-
-	if ctx.Err() == context.DeadlineExceeded {
-		return map[string]any{"success": false, "error": "Execution timed out (300s limit)"}
-	}
-
+func executeListTasks() map[string]any {
+	rows, err := db.Pool.Query(context.Background(), `
+		SELECT task_id, status, started_at, command 
+		FROM tasks 
+		ORDER BY started_at DESC LIMIT 10`)
 	if err != nil {
-		log.Printf("[AiChat] Code execution error: %v, stderr: %s", err, errOutput)
+		return map[string]any{"success": false, "error": err.Error()}
+	}
+	defer rows.Close()
+
+	var tasks []map[string]any
+	for rows.Next() {
+		var id, status, command string
+		var startedAt time.Time
+		if err := rows.Scan(&id, &status, &startedAt, &command); err == nil {
+			tasks = append(tasks, map[string]any{
+				"task_id":           id,
+				"status":            status,
+				"started_at":        startedAt.Format(time.RFC3339),
+				"command_preview":   command,
+			})
+		}
+	}
+	return map[string]any{"success": true, "tasks": tasks}
+}
+
+func executeReadTaskLog(args map[string]any) map[string]any {
+	taskID, _ := args["task_id"].(string)
+	if taskID == "" {
+		return map[string]any{"success": false, "error": "task_id is required"}
+	}
+
+	lines := 50
+	if l, ok := args["lines"].(float64); ok {
+		lines = int(l)
+	}
+
+	var logPath string
+	err := db.Pool.QueryRow(context.Background(), `SELECT log_path FROM tasks WHERE task_id = $1`, taskID).Scan(&logPath)
+	if err != nil {
+		return map[string]any{"success": false, "error": "Task not found"}
+	}
+
+	out, err := exec.Command("tail", "-n", fmt.Sprint(lines), logPath).Output()
+	if err != nil {
+		return map[string]any{"success": false, "error": fmt.Sprintf("Failed to read log: %v", err)}
+	}
+
+	return map[string]any{
+		"success": true,
+		"task_id": taskID,
+		"content": string(out),
+	}
+}
+
+func executeViewFile(args map[string]any) map[string]any {
+	filePath, _ := args["file_path"].(string)
+	if filePath == "" {
+		return map[string]any{"success": false, "error": "file_path is required"}
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return map[string]any{"success": false, "error": err.Error()}
+	}
+
+	mimeType := http.DetectContentType(data)
+	if strings.HasPrefix(mimeType, "image/") || strings.HasPrefix(mimeType, "audio/") || mimeType == "application/pdf" {
 		return map[string]any{
-			"success": false,
-			"error":   fmt.Sprintf("Execution failed: %s", errOutput),
-			"output":  truncateTerminalOutput(output),
+			"success": true,
+			"inline_data": map[string]any{
+				"mime_type": mimeType,
+				"data":      base64.StdEncoding.EncodeToString(data),
+			},
 		}
 	}
 
-	log.Printf("[AiChat] Code execution successful, output length: %d", len(output))
-	return map[string]any{"success": true, "output": truncateTerminalOutput(output)}
+	ext := strings.ToLower(filepath.Ext(filePath))
+	textExts := map[string]bool{
+		".go": true, ".py": true, ".js": true, ".ts": true, ".json": true, 
+		".yaml": true, ".yml": true, ".toml": true, ".sh": true, ".md": true, 
+		".txt": true, ".html": true, ".css": true,
+	}
+
+	if strings.HasPrefix(mimeType, "text/") || textExts[ext] {
+		return map[string]any{
+			"success": true,
+			"content": string(data),
+		}
+	}
+
+	return map[string]any{"success": false, "error": "unsupported binary format: " + mimeType}
+}
+
+func executePublishArtifact(args map[string]any) map[string]any {
+	filePath, _ := args["file_path"].(string)
+	if filePath == "" {
+		return map[string]any{"success": false, "error": "file_path is required"}
+	}
+	
+	cleanPath := filepath.Clean(filePath)
+	if _, err := os.Stat(cleanPath); os.IsNotExist(err) {
+		return map[string]any{"success": false, "error": "file not found"}
+	}
+	
+	artifactID := fmt.Sprintf("%d", time.Now().UnixNano())
+	
+	mimeType := "application/octet-stream"
+	data, err := os.ReadFile(cleanPath)
+	if err == nil {
+		mimeType = http.DetectContentType(data)
+	}
+	
+	_, err = db.Pool.Exec(context.Background(), `
+		INSERT INTO artifacts (artifact_id, file_path, mime_type, created_at)
+		VALUES ($1, $2, $3, NOW())`,
+		artifactID, cleanPath, mimeType)
+	
+	if err != nil {
+		return map[string]any{"success": false, "error": "db insert failed"}
+	}
+	
+	port := os.Getenv("ARTIFACT_PORT")
+	if port == "" { port = "8080" }
+	
+	url := fmt.Sprintf("http://%s:%s/?artifact=%s", artifacts.ServerIP, port, artifactID)
+	return map[string]any{
+		"success": true,
+		"url": url,
+		"artifact_id": artifactID,
+	}
 }
 
 func executeGetLatestData(args map[string]any) map[string]any {
@@ -673,13 +841,31 @@ func executeReadChat(args map[string]any) map[string]any {
 			limit = v
 		}
 	}
-	if limit > 50 {
-		limit = 50
+	if limit > 200 {
+		limit = 200
 	}
 
-	messages, err := botClient.GetMessages(chatID, &telegram.SearchOption{Limit: int32(limit)})
+	dummyMsg, err := botClient.SendMessage(chatID, ".", &telegram.SendOptions{Silent: true})
 	if err != nil {
-		return map[string]any{"success": false, "error": err.Error()}
+		return map[string]any{"success": false, "error": "failed to get anchor message"}
+	}
+	anchorID := dummyMsg.ID
+	botClient.DeleteMessages(chatID, []int32{anchorID})
+
+	var ids []int32
+	for i := 1; i <= limit; i++ {
+		id := anchorID - int32(i)
+		if id > 0 {
+			ids = append(ids, id)
+		}
+	}
+
+	var messages []telegram.NewMessage
+	if len(ids) > 0 {
+		messages, err = botClient.GetMessages(chatID, &telegram.SearchOption{IDs: ids})
+		if err != nil {
+			return map[string]any{"success": false, "error": err.Error()}
+		}
 	}
 
 	var msgsList []map[string]any
