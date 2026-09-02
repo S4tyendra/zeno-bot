@@ -24,14 +24,6 @@ var schemaStatements = []string{
 		id BIGINT PRIMARY KEY,
 		kind TEXT NOT NULL CHECK (kind IN ('chat', 'user'))
 	)`,
-	`CREATE TABLE IF NOT EXISTS gpt_auth (
-		id TEXT PRIMARY KEY,
-		access_token TEXT NOT NULL DEFAULT '',
-		refresh_token TEXT NOT NULL DEFAULT '',
-		id_token TEXT NOT NULL DEFAULT '',
-		account_id TEXT NOT NULL DEFAULT '',
-		last_refresh TIMESTAMPTZ NOT NULL DEFAULT NOW()
-	)`,
 	`CREATE TABLE IF NOT EXISTS system_settings (
 		key TEXT PRIMARY KEY,
 		value JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -56,7 +48,6 @@ var schemaStatements = []string{
 		mime_type TEXT NOT NULL DEFAULT '',
 		file_name TEXT NOT NULL DEFAULT '',
 		uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		data BYTEA,
 		PRIMARY KEY (chat_id, msg_id)
 	)`,
 	`CREATE TABLE IF NOT EXISTS tool_history (
@@ -136,6 +127,10 @@ func migrate(ctx context.Context) error {
 		if _, err := Pool.Exec(ctx, stmt); err != nil {
 			return err
 		}
+	}
+	// Files live in GCS (gs://aidatax); drop leftover BYTEA blobs.
+	if _, err := Pool.Exec(ctx, `ALTER TABLE uploaded_files DROP COLUMN IF EXISTS data`); err != nil {
+		return err
 	}
 	return nil
 }

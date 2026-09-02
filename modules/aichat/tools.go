@@ -2,7 +2,6 @@ package aichat
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -210,12 +209,15 @@ func init() {
 	json.Unmarshal([]byte(`{
 		"type": "object",
 		"properties": {
+			"file_id": {
+				"type": "integer",
+				"description": "Telegram message id of a file in this chat (shown as file_id in context). Reloads from Telegram into GCS if the 24h object expired, then attaches it."
+			},
 			"file_path": {
 				"type": "string",
-				"description": "Absolute path to the file to read"
+				"description": "Absolute local path to a file to read"
 			}
-		},
-		"required": ["file_path"]
+		}
 	}`), &viewFileParams)
 
 	var publishArtifactParams genai.Schema
@@ -285,7 +287,7 @@ func init() {
 				},
 				{
 					Name:        "view_file",
-					Description: "Read any local file and inject it into AI context. Images/audio/PDF → Gemini inline blob. Text/code files → plain text. Any path allowed.",
+					Description: "Reload a Telegram file by file_id (message id from context) or read a local path. Use file_id when a GCS object expired after 24h. Native Gemini types are attached so you can see them.",
 					Parameters:  &viewFileParams,
 				},
 				{
@@ -313,7 +315,7 @@ func executeFunctionCall(fc *genai.FunctionCall, chatID int64, replyToMsgID int3
 	case "read_task_log":
 		return executeReadTaskLog(fc.Args)
 	case "view_file":
-		return executeViewFile(fc.Args)
+		return executeViewFile(fc.Args, chatID)
 	case "publish_artifact":
 		return executePublishArtifact(fc.Args)
 	case "get_latest_data":
@@ -483,10 +485,10 @@ func executeListTasks() map[string]any {
 		var startedAt time.Time
 		if err := rows.Scan(&id, &status, &startedAt, &command); err == nil {
 			tasks = append(tasks, map[string]any{
-				"task_id":           id,
-				"status":            status,
-				"started_at":        startedAt.Format(time.RFC3339),
-				"command_preview":   command,
+				"task_id":         id,
+				"status":          status,
+				"started_at":      startedAt.Format(time.RFC3339),
+				"command_preview": command,
 			})
 		}
 	}
@@ -522,10 +524,36 @@ func executeReadTaskLog(args map[string]any) map[string]any {
 	}
 }
 
-func executeViewFile(args map[string]any) map[string]any {
+func asInt32(v any) int32 {
+	switch n := v.(type) {
+	case float64:
+		return int32(n)
+	case int:
+		return int32(n)
+	case int32:
+		return n
+	case int64:
+		return int32(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int32(i)
+	case string:
+		var i int32
+		fmt.Sscanf(n, "%d", &i)
+		return i
+	default:
+		return 0
+	}
+}
+
+func executeViewFile(args map[string]any, chatID int64) map[string]any {
+	if fid := asInt32(args["file_id"]); fid != 0 {
+		return reloadTelegramFile(chatID, fid)
+	}
+
 	filePath, _ := args["file_path"].(string)
 	if filePath == "" {
-		return map[string]any{"success": false, "error": "file_path is required"}
+		return map[string]any{"success": false, "error": "file_id or file_path is required"}
 	}
 
 	data, err := os.ReadFile(filePath)
@@ -533,32 +561,77 @@ func executeViewFile(args map[string]any) map[string]any {
 		return map[string]any{"success": false, "error": err.Error()}
 	}
 
-	mimeType := http.DetectContentType(data)
-	if strings.HasPrefix(mimeType, "image/") || strings.HasPrefix(mimeType, "audio/") || mimeType == "application/pdf" {
+	mimeType := normalizeMIME(http.DetectContentType(data), filePath)
+	name := filepath.Base(filePath)
+
+	if isNativeGeminiMIME(mimeType) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		object := fmt.Sprintf("local/%d/%s", time.Now().UnixNano(), name)
+		uri, err := gcsUpload(ctx, object, mimeType, data)
+		if err != nil {
+			return map[string]any{"success": false, "error": err.Error()}
+		}
+		part := &genai.Part{FileData: &genai.FileData{FileURI: uri, MIMEType: mimeType, DisplayName: name}}
 		return map[string]any{
-			"success": true,
-			"inline_data": map[string]any{
-				"mime_type": mimeType,
-				"data":      base64.StdEncoding.EncodeToString(data),
-			},
+			"success":   true,
+			"file_name": name,
+			"mime_type": mimeType,
+			"gcs_uri":   uri,
+			"_attach":   []*genai.Part{part},
 		}
 	}
 
 	ext := strings.ToLower(filepath.Ext(filePath))
 	textExts := map[string]bool{
-		".go": true, ".py": true, ".js": true, ".ts": true, ".json": true, 
-		".yaml": true, ".yml": true, ".toml": true, ".sh": true, ".md": true, 
+		".go": true, ".py": true, ".js": true, ".ts": true, ".json": true,
+		".yaml": true, ".yml": true, ".toml": true, ".sh": true, ".md": true,
 		".txt": true, ".html": true, ".css": true,
 	}
 
 	if strings.HasPrefix(mimeType, "text/") || textExts[ext] {
 		return map[string]any{
 			"success": true,
-			"content": string(data),
+			"content": truncateTerminalOutput(string(data)),
 		}
 	}
 
 	return map[string]any{"success": false, "error": "unsupported binary format: " + mimeType}
+}
+
+func reloadTelegramFile(chatID int64, msgID int32) map[string]any {
+	if botClient == nil {
+		return map[string]any{"success": false, "error": "bot not ready"}
+	}
+	msgs, err := botClient.GetMessages(chatID, &telegram.SearchOption{IDs: []int32{msgID}})
+	if err != nil || len(msgs) == 0 {
+		return map[string]any{"success": false, "error": fmt.Sprintf("message %d not found in this chat", msgID)}
+	}
+	msg := msgs[0]
+	if msg.Media() == nil {
+		return map[string]any{"success": false, "error": "that message has no file"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	f, err := ensureFileOnGCS(ctx, &msg)
+	if err != nil {
+		return map[string]any{"success": false, "error": err.Error()}
+	}
+	out := map[string]any{
+		"success":   true,
+		"file_id":   f.MsgID,
+		"file_name": f.FileName,
+		"mime_type": f.MIMEType,
+		"gcs_uri":   f.GoogleFileURI,
+	}
+	if part := nativeFilePart(f); part != nil {
+		out["_attach"] = []*genai.Part{part}
+		out["attached"] = true
+	} else {
+		out["attached"] = false
+		out["note"] = "uploaded to GCS but mime is not a native Gemini type"
+	}
+	return out
 }
 
 func executePublishArtifact(args map[string]any) map[string]any {
@@ -566,29 +639,29 @@ func executePublishArtifact(args map[string]any) map[string]any {
 	if filePath == "" {
 		return map[string]any{"success": false, "error": "file_path is required"}
 	}
-	
+
 	cleanPath := filepath.Clean(filePath)
 	if _, err := os.Stat(cleanPath); os.IsNotExist(err) {
 		return map[string]any{"success": false, "error": "file not found"}
 	}
-	
+
 	artifactID := fmt.Sprintf("%d", time.Now().UnixNano())
-	
+
 	mimeType := "application/octet-stream"
 	data, err := os.ReadFile(cleanPath)
 	if err == nil {
 		mimeType = http.DetectContentType(data)
 	}
-	
+
 	_, err = db.Pool.Exec(context.Background(), `
 		INSERT INTO artifacts (artifact_id, file_path, mime_type, created_at)
 		VALUES ($1, $2, $3, NOW())`,
 		artifactID, cleanPath, mimeType)
-	
+
 	if err != nil {
 		return map[string]any{"success": false, "error": "db insert failed"}
 	}
-	
+
 	url := artifacts.GetArtifactURL(artifactID)
 	return map[string]any{
 		"success":     true,

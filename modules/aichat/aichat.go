@@ -9,7 +9,9 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf16"
 
+	"cloud.google.com/go/auth"
 	"cloud.google.com/go/auth/credentials"
 	"github.com/amarnathcjd/gogram/telegram"
 	"google.golang.org/genai"
@@ -58,6 +60,7 @@ You're not just a pretty texter — you can actually do shit. Code, search, send
 - **send_to_chat**: Send a message to any chat. Params: chat_id (int), text (string).
 - **create_image**: Generate images from text. Params: prompt (required), aspect_ratio (1:1/9:16/16:9/3:4/4:3/3:2/2:3/5:4/4:5/21:9), high_quality (bool). Default is 9:16. 4K costs more — only use high_quality when @s4tyendra asks. Saves to /app/generated/.
   Workflows: create_image -> returns path -> send_file. run_code creates in /workspace/ -> send_file from there.
+- **view_file**: Reload a Telegram file by file_id (the message id shown in context) or read a local path. GCS objects expire after 24h — if a file says expired, call view_file with that file_id. Native Gemini types (images/video/audio/pdf/txt/html/css/csv/md/xml) get attached so you can actually see them.
 
 ## Efficiency Rules
 - Action over words. Don't paste code — run it. Unless they specifically ask to see it.
@@ -67,7 +70,7 @@ You're not just a pretty texter — you can actually do shit. Code, search, send
 - If a tool returns nothing useful, move on. Don't rephrase the same query 5 times.
 - **Only answer the LAST/CURRENT message.** The conversation history is context ONLY — not a queue of things to answer. If something was already answered, it's done. Ignore it.
 - **Do NOT volunteer summaries, recaps, or commentary on old messages** unless explicitly asked.
-- **Files in context:** When a user message has a File URI part attached, that IS the file they sent. If they ask "what's in this image/file", analyze the File URI directly — don't run ls or look for files on disk.
+- **Files in context:** Native files are attached as GCS File URIs (gs://aidatax/...). If they ask about an image/file, look at the attached File URI — don't run ls. Each file note includes file_id=<telegram message id>. If the bucket object expired, call view_file with that file_id to reload it. When the user replies to a message, that reply target (text + media) is included in the current turn — you CAN see it.
 - **NEVER output XML tags** in your response. Tags like <message>, <memories>, </message> are internal system metadata. Your reply should be clean text only. Strip them completely.
 
 ## Formatting Rules
@@ -93,12 +96,11 @@ You're not just a pretty texter — you can actually do shit. Code, search, send
 var (
 	botClient   *telegram.Client
 	botUserID   int64
+	botUsername string
 	genaiClient *genai.Client
+	vertexCreds *auth.Credentials
 	askPattern  = regexp.MustCompile(`(?i)@ask\b`)
-	gptPattern  = regexp.MustCompile(`(?i)(?:^|\s)/gpt\b`)
 )
-
-var maxMediaSize int64
 
 type Memory struct {
 	UserID    int64
@@ -114,13 +116,13 @@ type UploadedFile struct {
 	MIMEType      string
 	FileName      string
 	UploadedAt    time.Time
-	Data          []byte
 }
 
 type SavedToolCall struct {
-	Name     string `json:"name"`
-	Args     string `json:"args"`
-	Response string `json:"response"`
+	Name             string `json:"name"`
+	Args             string `json:"args"`
+	Response         string `json:"response"`
+	ThoughtSignature string `json:"thought_signature,omitempty"`
 }
 
 type ToolCallHistory struct {
@@ -136,6 +138,7 @@ func Register(client *telegram.Client) {
 	me, err := client.GetMe()
 	if err == nil && me != nil {
 		botUserID = me.ID
+		botUsername = me.Username
 	}
 
 	ctx := context.Background()
@@ -151,6 +154,7 @@ func Register(client *telegram.Client) {
 	if err != nil {
 		log.Fatalf("[AiChat] Failed to parse credentials JSON: %v", err)
 	}
+	vertexCreds = creds
 
 	genaiClient, err = genai.NewClient(ctx, &genai.ClientConfig{
 		Project:     config.VertexProjectID,
@@ -166,7 +170,6 @@ func Register(client *telegram.Client) {
 	for _, id := range config.AllowedChatIDs {
 		AddAllowChat(id)
 	}
-	maxMediaSize = config.MaxMediaSize
 
 	LoadAllowlist()
 
@@ -175,7 +178,7 @@ func Register(client *telegram.Client) {
 	startJWTRefreshCron()
 
 	client.On("cmd:askai", handleAskAI)
-	client.On("cmd:gpt", handleGPT)
+	client.On("cmd:ask", handleAskAI)
 	client.On("cmd:search", handleSearch)
 	client.On("message", handleMessage)
 	client.On("callback:get_vertex_links", handleGetVertexLinks)
@@ -260,16 +263,18 @@ func handleMessage(m *telegram.NewMessage) error {
 		}
 	}
 
-	if !triggered && m.Message != nil {
+	if !triggered && m.Message != nil && botUsername != "" {
+		want := "@" + botUsername
 		for _, entity := range m.Message.Entities {
-			if mention, ok := entity.(*telegram.MessageEntityMention); ok {
-				mentionText := text[mention.Offset : mention.Offset+mention.Length]
-				if strings.EqualFold(mentionText, "@iSatyaBot") {
-					triggered = true
-					query = strings.Replace(text, mentionText, "", 1)
-					query = strings.TrimSpace(query)
-					break
-				}
+			mention, ok := entity.(*telegram.MessageEntityMention)
+			if !ok {
+				continue
+			}
+			mentionText := utf16Slice(text, mention.Offset, mention.Length)
+			if strings.EqualFold(mentionText, want) {
+				triggered = true
+				query = strings.TrimSpace(strings.Replace(text, mentionText, "", 1))
+				break
 			}
 		}
 	}
@@ -280,23 +285,14 @@ func handleMessage(m *telegram.NewMessage) error {
 
 	log.Printf("[AiChat] Handled message trigger: query=%q, chatID=%d, sender=%s", query, m.ChatID(), getSenderName(m))
 
-	if gptPattern.MatchString(query) {
-		query = strings.TrimSpace(gptPattern.ReplaceAllString(query, ""))
-		log.Printf("[AiChat] Routing to GPT: query=%q", query)
-		return processGPTRequest(m, query)
-	}
-
 	return processAIRequest(m, query)
 }
 
 func processAIRequest(m *telegram.NewMessage, query string) error {
 	chatID := m.ChatID()
 	limit := 50
-	if m.IsPrivate() {
-		limit = 50
-	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 
 	contents, err := buildDynamicTurns(ctx, m, query, limit)
@@ -311,10 +307,10 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 		return nil
 	}
 
-	responseText, sourcesURL, err := processWithFunctionCalling(contents, chatID, m.ID, placeholder)
+	responseText, sourcesURL, err := processWithFunctionCalling(ctx, contents, chatID, m.ID, placeholder)
 	if err != nil {
 		log.Printf("[AiChat] GenAI error: %v", err)
-		placeholder.Edit("Something went wrong. Try again later.")
+		editStatus(placeholder, fmt.Sprintf("❌ Google failed after retries: `%s`", truncateString(err.Error(), 180)))
 		return nil
 	}
 
@@ -325,24 +321,27 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 	return sendLargeResponse(m, placeholder, responseText)
 }
 
-func isInlineSupported(mime string) bool {
-	if strings.HasPrefix(mime, "image/") {
-		return true
+func utf16Slice(s string, offset, length int32) string {
+	if offset < 0 || length <= 0 {
+		return ""
 	}
-	if strings.HasPrefix(mime, "audio/") {
-		return true
+	u := utf16.Encode([]rune(s))
+	start := int(offset)
+	if start >= len(u) {
+		return ""
 	}
-	if mime == "application/pdf" {
-		return true
+	end := start + int(length)
+	if end > len(u) {
+		end = len(u)
 	}
-	return false
+	return string(utf16.Decode(u[start:end]))
 }
 
 func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string, limit int) ([]*genai.Content, error) {
 	chatID := m.ChatID()
 	replyToMsgID := m.ReplyToMsgID()
 
-	history := fetchTelegramHistory(chatID, m.ID, replyToMsgID, limit)
+	history := fetchTelegramHistory(chatID, m.ID, limit)
 	history = append(history, *m)
 
 	var userIDs []int64
@@ -391,6 +390,7 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 	for _, msg := range history {
 		senderID := msg.SenderID()
 		isBot := senderID == botUserID
+		isCurrent := msg.ID == m.ID
 		msgID := msg.ID
 
 		chatName := "PrivateChat"
@@ -399,84 +399,36 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 		}
 
 		msgText := msg.Text()
-
-		// Automatically process and upload files inside window context if not uploaded yet
-		var fileDoc UploadedFile
-		hasFile := false
-		isText := false
-		var textFileContent string
-
-		if msg.Media() != nil {
-			err = db.Pool.QueryRow(ctx, `
-				SELECT chat_id, msg_id, google_file_uri, mime_type, file_name, uploaded_at, data
-				FROM uploaded_files WHERE chat_id = $1 AND msg_id = $2`,
-				chatID, msgID).Scan(
-				&fileDoc.ChatID, &fileDoc.MsgID, &fileDoc.GoogleFileURI, &fileDoc.MIMEType,
-				&fileDoc.FileName, &fileDoc.UploadedAt, &fileDoc.Data,
-			)
-			if err != nil {
-				log.Printf("[AiChat] File found in msg ID %d but not in DB. Downloading...", msgID)
-				upFile, err := handleFileUpload(ctx, &msg)
-				if err == nil && upFile != nil {
-					fileDoc = *upFile
-					hasFile = true
-				}
-			} else {
-				log.Printf("[AiChat] DB Cache Hit: Loaded file %s (%s, %d bytes) for msg ID %d", fileDoc.FileName, fileDoc.MIMEType, len(fileDoc.Data), msgID)
-				hasFile = true
-			}
-
-			if hasFile {
-				if isTextFile(fileDoc.FileName, fileDoc.MIMEType) {
-					isText = true
-					textFileContent = string(fileDoc.Data)
-					log.Printf("[AiChat] Detected text file: %s (%d chars) for msg ID %d", fileDoc.FileName, len(textFileContent), msgID)
-				}
-			}
+		if isCurrent && query != "" {
+			msgText = query
 		}
 
-		repliedToFileName := ""
-		if msg.ReplyToMsgID() != 0 {
-			var fDoc UploadedFile
-			err = db.Pool.QueryRow(ctx, `
-				SELECT file_name FROM uploaded_files WHERE chat_id = $1 AND msg_id = $2`,
-				chatID, msg.ReplyToMsgID()).Scan(&fDoc.FileName)
-			if err == nil {
-				repliedToFileName = fDoc.FileName
+		var mediaParts []*genai.Part
+		if !isBot && msg.Media() != nil {
+			note, parts := fileContext(ctx, &msg, isCurrent)
+			if note != "" {
+				msgText = note + "\n" + msgText
 			}
+			mediaParts = append(mediaParts, parts...)
+		}
+
+		if isCurrent && replyToMsgID != 0 {
+			rNote, rParts := replyContext(ctx, chatID, replyToMsgID)
+			if rNote != "" {
+				msgText = rNote + "\n" + msgText
+			}
+			mediaParts = append(mediaParts, rParts...)
 		}
 
 		var formattedXML string
 		if isBot {
 			formattedXML = formatXMLMessage(msgText, "ZenoBot", botUserID, chatID, chatName, msgID, time.Unix(int64(msg.Date()), 0))
 		} else {
-			senderName := getSenderFromMessage(&msg)
-			if repliedToFileName != "" {
-				msgText = fmt.Sprintf("[Replied to file: %s] %s", repliedToFileName, msgText)
-			}
-			if isText {
-				msgText = fmt.Sprintf("\n--- File: %s ---\n%s\n---\n%s", fileDoc.FileName, textFileContent, msgText)
-				log.Printf("[AiChat] Appended text file %s inline to formatted prompt for msg ID %d", fileDoc.FileName, msgID)
-			}
-			formattedXML = formatXMLMessage(msgText, senderName, senderID, chatID, chatName, msgID, time.Unix(int64(msg.Date()), 0))
+			formattedXML = formatXMLMessage(msgText, getSenderFromMessage(&msg), senderID, chatID, chatName, msgID, time.Unix(int64(msg.Date()), 0))
 		}
 
-		var parts []*genai.Part
-		parts = append(parts, &genai.Part{Text: formattedXML})
-
-		if !isBot && hasFile && !isText {
-			if isInlineSupported(fileDoc.MIMEType) {
-				log.Printf("[AiChat] Attaching inline media part %s (%s, %d bytes) to Gemini context for msg ID %d", fileDoc.FileName, fileDoc.MIMEType, len(fileDoc.Data), msgID)
-				parts = append(parts, &genai.Part{
-					InlineData: &genai.Blob{
-						Data:     fileDoc.Data,
-						MIMEType: fileDoc.MIMEType,
-					},
-				})
-			} else {
-				log.Printf("[AiChat] Skipping unsupported inline media part %s (%s) to prevent Gemini 400 error for msg ID %d", fileDoc.FileName, fileDoc.MIMEType, msgID)
-			}
-		}
+		parts := []*genai.Part{{Text: formattedXML}}
+		parts = append(parts, mediaParts...)
 
 		role := genai.RoleUser
 		if isBot {
@@ -497,18 +449,27 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 			_ = json.Unmarshal(toolCallsJSON, &toolHist.ToolCalls)
 		}
 		if err == nil && len(toolHist.ToolCalls) > 0 {
+			if toolHist.ToolCalls[0].ThoughtSignature == "" {
+				log.Printf("[AiChat] skipping unsigned tool history for msg %d (%d calls)", msgID, len(toolHist.ToolCalls))
+				continue
+			}
 			var modelParts []*genai.Part
 			var userParts []*genai.Part
 
 			for _, tc := range toolHist.ToolCalls {
 				var args map[string]any
 				_ = json.Unmarshal([]byte(tc.Args), &args)
+				var sig []byte
+				if tc.ThoughtSignature != "" {
+					sig, _ = base64.StdEncoding.DecodeString(tc.ThoughtSignature)
+				}
 
 				modelParts = append(modelParts, &genai.Part{
 					FunctionCall: &genai.FunctionCall{
 						Name: tc.Name,
 						Args: args,
 					},
+					ThoughtSignature: sig,
 				})
 
 				var resp map[string]any
@@ -535,41 +496,6 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 	}
 
 	return contents, nil
-}
-
-func handleFileUpload(ctx context.Context, m *telegram.NewMessage) (*UploadedFile, error) {
-	log.Printf("[AiChat] Downloading media from Telegram for msg ID %d...", m.ID)
-	mediaData, mimeType, fileName := downloadMedia(m)
-	if mediaData == nil {
-		return nil, fmt.Errorf("failed to download media or media is too large")
-	}
-
-	upFile := UploadedFile{
-		ChatID:     m.ChatID(),
-		MsgID:      m.ID,
-		MIMEType:   mimeType,
-		FileName:   fileName,
-		UploadedAt: time.Now(),
-		Data:       mediaData,
-	}
-
-	_, err := db.Pool.Exec(ctx, `
-		INSERT INTO uploaded_files (chat_id, msg_id, google_file_uri, mime_type, file_name, uploaded_at, data)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (chat_id, msg_id) DO UPDATE SET
-			google_file_uri = EXCLUDED.google_file_uri,
-			mime_type = EXCLUDED.mime_type,
-			file_name = EXCLUDED.file_name,
-			uploaded_at = EXCLUDED.uploaded_at,
-			data = EXCLUDED.data`,
-		upFile.ChatID, upFile.MsgID, upFile.GoogleFileURI, upFile.MIMEType, upFile.FileName, upFile.UploadedAt, upFile.Data)
-	if err != nil {
-		log.Printf("[AiChat] Failed to save file mapping to DB: %v", err)
-	} else {
-		log.Printf("[AiChat] Downloaded & Cached: Stored file %s (%s, %d bytes) to DB for msg ID %d", fileName, mimeType, len(mediaData), m.ID)
-	}
-
-	return &upFile, nil
 }
 
 func getMemoriesForUsers(ctx context.Context, userIDs []int64) (map[int64][]Memory, error) {
@@ -601,18 +527,30 @@ func getMemoriesForUsers(ctx context.Context, userIDs []int64) (map[int64][]Memo
 	return memMap, rows.Err()
 }
 
-func saveToolCallHistory(ctx context.Context, chatID int64, msgID int32, name string, args map[string]any, response map[string]any) {
+func publicToolResult(r map[string]any) map[string]any {
+	out := make(map[string]any, len(r))
+	for k, v := range r {
+		if k == "_attach" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func saveToolCallHistory(ctx context.Context, chatID int64, msgID int32, name string, args map[string]any, response map[string]any, thoughtSig []byte) {
 	if db.Pool == nil {
 		return
 	}
 
 	argsBytes, _ := json.Marshal(args)
-	respBytes, _ := json.Marshal(response)
+	respBytes, _ := json.Marshal(publicToolResult(response))
 
 	callJSON, err := json.Marshal(SavedToolCall{
-		Name:     name,
-		Args:     string(argsBytes),
-		Response: string(respBytes),
+		Name:             name,
+		Args:             string(argsBytes),
+		Response:         string(respBytes),
+		ThoughtSignature: base64.StdEncoding.EncodeToString(thoughtSig),
 	})
 	if err != nil {
 		log.Printf("[DB] Failed to marshal tool call: %v", err)
@@ -684,9 +622,9 @@ func sendLargeResponse(m *telegram.NewMessage, placeholder *telegram.NewMessage,
 	return nil
 }
 
-func processWithFunctionCalling(contents []*genai.Content, chatID int64, currentMsgID int32, placeholder *telegram.NewMessage) (string, string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
+func processWithFunctionCalling(ctx context.Context, contents []*genai.Content, chatID int64, currentMsgID int32, placeholder *telegram.NewMessage) (string, string, error) {
+	model := db.GetRuntimeModel("default", config.DefaultModel)
+	prefs := LoadThinkingPrefs()
 
 	configAI := &genai.GenerateContentConfig{
 		SystemInstruction: &genai.Content{
@@ -702,111 +640,147 @@ func processWithFunctionCalling(contents []*genai.Content, chatID int64, current
 			{Category: genai.HarmCategorySexuallyExplicit, Threshold: genai.HarmBlockThresholdBlockNone},
 			{Category: genai.HarmCategoryDangerousContent, Threshold: genai.HarmBlockThresholdBlockNone},
 		},
-		ThinkingConfig: &genai.ThinkingConfig{
-			ThinkingBudget: genai.Ptr[int32](0),
-		},
+		ThinkingConfig:     thinkingConfigFor(model, prefs),
 		Tools:              aiTools,
 		ResponseModalities: []string{"TEXT"},
 	}
 
-	maxIterations := 4
-	var finalText string
+	status := func(s string) { editStatus(placeholder, s) }
+	maxIterations := 6
+	var finalText strings.Builder
 	var sourcesURL string
 
 	for i := 0; i < maxIterations; i++ {
-		log.Printf("[AiChat] Function calling iteration %d, contents count: %d", i+1, len(contents))
+		log.Printf("[AiChat] Function calling iteration %d, contents count: %d model=%s thinking=%q stream=%v parts=%s",
+			i+1, len(contents), model, prefs.Level, prefs.Stream, summarizeContents(contents))
 
-		var resp *genai.GenerateContentResponse
-		var genErr error
-		maxRetries := 5
-		for attempt := 0; attempt <= maxRetries; attempt++ {
-			resp, genErr = genaiClient.Models.GenerateContent(ctx, db.GetRuntimeModel("default", config.DefaultModel), contents, configAI)
-			if genErr == nil {
-				break
-			}
-			errStr := genErr.Error()
-			if attempt < maxRetries && (strings.Contains(errStr, "503") || strings.Contains(errStr, "UNAVAILABLE")) {
-				backoff := time.Duration(1<<uint(attempt)) * time.Second
-				log.Printf("[AiChat] Retrying after %v (attempt %d/%d): %v", backoff, attempt+1, maxRetries, genErr)
-				select {
-				case <-time.After(backoff):
-				case <-ctx.Done():
-					return "", "", ctx.Err()
-				}
-				continue
-			}
-			return "", "", genErr
-		}
-		if genErr != nil {
-			return "", "", genErr
+		thoughts := &thoughtStreamer{msg: placeholder, enabled: prefs.Stream}
+		acc, err := generateWithRetry(ctx, model, contents, configAI, status, thoughts)
+		if err != nil {
+			log.Printf("[AiChat] generate failed inventory=%s err=%v", summarizeContents(contents), err)
+			return "", "", err
 		}
 
-		if len(resp.Candidates) == 0 {
-			return "AI returned no response.", "", nil
-		}
-
-		candidate := resp.Candidates[0]
-		contents = append(contents, candidate.Content)
-
-		if candidate.GroundingMetadata != nil && len(candidate.GroundingMetadata.GroundingChunks) > 0 {
-			linkID, err := storeGroundingLinks(candidate.GroundingMetadata.GroundingChunks)
-			if err == nil {
-				log.Printf("[AiChat] Stored %d grounding links, ID: %s", len(candidate.GroundingMetadata.GroundingChunks), linkID)
+		modelContent := acc.modelContent()
+		if modelContent == nil {
+			if finalText.Len() == 0 {
+				return "AI returned no response.", "", nil
 			}
-		}
-
-		hasFunctionCall := false
-		var functionResponses []*genai.Part
-
-		for _, part := range candidate.Content.Parts {
-			if part.Text != "" {
-				finalText = part.Text
-			}
-
-			if part.FunctionCall != nil {
-				hasFunctionCall = true
-				fc := part.FunctionCall
-				log.Printf("[AiChat] Function call: %s with args: %v", fc.Name, fc.Args)
-
-				placeholder.Edit(fmt.Sprintf("🔧 Calling %s...", fc.Name))
-
-				result := executeFunctionCall(fc, chatID, currentMsgID)
-
-				saveToolCallHistory(ctx, chatID, currentMsgID, fc.Name, fc.Args, result)
-
-				if fc.Name == "get_latest_data" {
-					if u, ok := result["sources_url"].(string); ok {
-						sourcesURL = u
-					}
-					delete(result, "sources_url")
-				}
-
-				if resultJSON, err := json.MarshalIndent(result, "", "  "); err == nil {
-					logStr := string(resultJSON)
-					if len(logStr) > 2000 {
-						logStr = logStr[:2000] + "...(truncated)"
-					}
-					log.Printf("[AiChat] Function response for %s:\n%s", fc.Name, logStr)
-				}
-
-				functionResponses = append(functionResponses, &genai.Part{
-					FunctionResponse: &genai.FunctionResponse{
-						Name:     fc.Name,
-						Response: result,
-					},
-				})
-			}
-		}
-
-		if !hasFunctionCall {
 			break
+		}
+		contents = append(contents, modelContent)
+
+		if acc.grounding != nil && len(acc.grounding.GroundingChunks) > 0 {
+			if linkID, err := storeGroundingLinks(acc.grounding.GroundingChunks); err == nil {
+				log.Printf("[AiChat] Stored %d grounding links, ID: %s", len(acc.grounding.GroundingChunks), linkID)
+			}
+		}
+
+		if answer := acc.answerText(); answer != "" {
+			if finalText.Len() > 0 {
+				finalText.WriteString("\n")
+			}
+			finalText.WriteString(answer)
+		}
+
+		fcParts := acc.functionCallParts()
+		if len(fcParts) == 0 {
+			break
+		}
+
+		var functionResponses []*genai.Part
+		var extraParts []*genai.Part
+		for _, p := range fcParts {
+			fc := p.FunctionCall
+			log.Printf("[AiChat] Function call: %s with args: %v sig=%d", fc.Name, fc.Args, len(p.ThoughtSignature))
+			status(fmt.Sprintf("🔧 Calling `%s`...", fc.Name))
+
+			result := executeFunctionCall(fc, chatID, currentMsgID)
+			if attach, ok := result["_attach"].([]*genai.Part); ok {
+				extraParts = append(extraParts, attach...)
+			}
+			pub := publicToolResult(result)
+
+			saveToolCallHistory(ctx, chatID, currentMsgID, fc.Name, fc.Args, pub, p.ThoughtSignature)
+
+			if fc.Name == "get_latest_data" {
+				if u, ok := pub["sources_url"].(string); ok {
+					sourcesURL = u
+				}
+				delete(pub, "sources_url")
+			}
+
+			if resultJSON, err := json.MarshalIndent(pub, "", "  "); err == nil {
+				logStr := string(resultJSON)
+				if len(logStr) > 2000 {
+					logStr = logStr[:2000] + "...(truncated)"
+				}
+				log.Printf("[AiChat] Function response for %s:\n%s", fc.Name, logStr)
+			}
+
+			functionResponses = append(functionResponses, &genai.Part{
+				FunctionResponse: &genai.FunctionResponse{
+					Name:     fc.Name,
+					Response: pub,
+				},
+			})
 		}
 
 		contents = append(contents, &genai.Content{
 			Role:  genai.RoleUser,
 			Parts: functionResponses,
 		})
+		if len(extraParts) > 0 {
+			contents = append(contents, &genai.Content{
+				Role:  genai.RoleUser,
+				Parts: extraParts,
+			})
+		}
 	}
 
-	return finalText, sourcesURL, nil
+	out := strings.TrimSpace(finalText.String())
+	if out == "" {
+		out = "AI returned no response."
+	}
+	return out, sourcesURL, nil
+}
+
+func summarizeContents(contents []*genai.Content) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "n=%d", len(contents))
+	for i, c := range contents {
+		if c == nil {
+			fmt.Fprintf(&b, " [%d:nil]", i)
+			continue
+		}
+		fmt.Fprintf(&b, " [%d:%s", i, c.Role)
+		for _, p := range c.Parts {
+			if p == nil {
+				b.WriteString(" nil")
+				continue
+			}
+			switch {
+			case p.FunctionCall != nil:
+				fmt.Fprintf(&b, " fc:%s/sig%d", p.FunctionCall.Name, len(p.ThoughtSignature))
+			case p.FunctionResponse != nil:
+				fmt.Fprintf(&b, " fr:%s", p.FunctionResponse.Name)
+			case p.FileData != nil:
+				fmt.Fprintf(&b, " file:%s", p.FileData.MIMEType)
+			case p.InlineData != nil:
+				fmt.Fprintf(&b, " inline:%s", p.InlineData.MIMEType)
+			case p.Thought:
+				fmt.Fprintf(&b, " thought:%d", len(p.Text))
+			case p.Text != "":
+				fmt.Fprintf(&b, " text:%d", len(p.Text))
+			default:
+				b.WriteString(" empty")
+			}
+		}
+		b.WriteByte(']')
+	}
+	s := b.String()
+	if len(s) > 1500 {
+		return s[:1500] + "…"
+	}
+	return s
 }

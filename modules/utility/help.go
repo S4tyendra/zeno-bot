@@ -11,9 +11,10 @@ Here are the available commands:
 
 **AI & Search**
 • /ask <query or reply> - Ask the AI (Gemini)
+• /askai <query or reply> - /ask (alias)
 • /search <query or reply> - Search the web (Perplexity)
 • @ask <query or reply> - /ask (alias)
-• Reply with @ask - Ask about the replied message
+• Reply to a message (text or media) with @ask — the reply target is shown to the AI
 
 **Utilities**
 • /math <expr> - Math, Unit & Currency conversion

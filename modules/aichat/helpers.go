@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -103,7 +104,7 @@ func getSenderFromMessage(msg *telegram.NewMessage) string {
 	return "Unknown"
 }
 
-func fetchTelegramHistory(chatID int64, currentMsgID int32, excludeReplyID int32, limit int) []telegram.NewMessage {
+func fetchTelegramHistory(chatID int64, currentMsgID int32, limit int) []telegram.NewMessage {
 	if botClient == nil {
 		return nil
 	}
@@ -138,7 +139,7 @@ func fetchTelegramHistory(chatID int64, currentMsgID int32, excludeReplyID int32
 
 	var result []telegram.NewMessage
 	for _, msg := range messages {
-		if msg.ID == currentMsgID || (excludeReplyID != 0 && msg.ID == excludeReplyID) {
+		if msg.ID == currentMsgID {
 			continue
 		}
 
@@ -146,7 +147,7 @@ func fetchTelegramHistory(chatID int64, currentMsgID int32, excludeReplyID int32
 		if text == "" && msg.Media() == nil {
 			continue
 		}
-		if strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "/askai") && !strings.HasPrefix(text, "/gpt") {
+		if strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "/askai") && !strings.HasPrefix(text, "/ask") {
 			continue
 		}
 
@@ -261,7 +262,7 @@ func downloadMedia(msg *telegram.NewMessage) ([]byte, string, string) {
 		return nil, "", ""
 	}
 
-	if int64(len(data)) > maxMediaSize {
+	if int64(len(data)) > gcsMaxBytes {
 		log.Printf("[AiChat] Downloaded media too large: %d bytes", len(data))
 		return nil, "", ""
 	}
@@ -304,4 +305,16 @@ func getRepliedMessageSenderID(chatID int64, msgID int32) int64 {
 	return 0
 }
 
-
+func isTextFile(fileName, mime string) bool {
+	if strings.HasPrefix(mime, "text/") {
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(fileName))
+	textExts := map[string]bool{
+		".txt": true, ".go": true, ".py": true, ".js": true, ".ts": true,
+		".c": true, ".cpp": true, ".h": true, ".html": true, ".css": true,
+		".md": true, ".json": true, ".yaml": true, ".yml": true, ".csv": true,
+		".sh": true, ".bat": true,
+	}
+	return textExts[ext]
+}

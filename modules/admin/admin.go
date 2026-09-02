@@ -35,6 +35,9 @@ func Register(client *telegram.Client) {
 	client.On("cmd:noallowai", handleNoAllowAI)
 	client.On("cmd:setmodel", handleSetModel)
 	client.On("cmd:getmodel", handleGetModel)
+	client.On("cmd:setthinking", handleSetThinking)
+	client.On("cmd:getthinking", handleGetThinking)
+	client.On("cmd:thinkstream", handleThinkStream)
 	client.On("cmd:sudoers", handleSudoers)
 }
 
@@ -178,20 +181,20 @@ func handleSetModel(m *telegram.NewMessage) error {
 	}
 	key := args[0]
 	modelName := args[1]
-	
+
 	switch strings.ToLower(key) {
 	case "default", "image", "highimage":
 	default:
 		m.Reply("❌ Invalid model key. Use `default`, `image`, or `highimage`.", &telegram.SendOptions{ParseMode: "Markdown"})
 		return nil
 	}
-	
+
 	err := db.SetRuntimeModel(key, modelName)
 	if err != nil {
 		m.Reply(fmt.Sprintf("❌ Failed to save model: %v", err))
 		return nil
 	}
-	
+
 	m.Reply(fmt.Sprintf("✅ Model `%s` updated to `%s`", key, modelName), &telegram.SendOptions{ParseMode: "Markdown"})
 	return nil
 }
@@ -201,13 +204,82 @@ func handleGetModel(m *telegram.NewMessage) error {
 		m.Reply("🚫 Not authorized.")
 		return nil
 	}
-	
+
 	def := db.GetRuntimeModel("default", config.DefaultModel)
 	img := db.GetRuntimeModel("image", config.ImageModel)
 	himg := db.GetRuntimeModel("highimage", config.HighImageModel)
-	
+
 	msg := fmt.Sprintf("🤖 **Current Models**\n\nDefault: `%s`\nImage: `%s`\nHighImage: `%s`", def, img, himg)
 	m.Reply(msg, &telegram.SendOptions{ParseMode: "Markdown"})
+	return nil
+}
+
+func handleSetThinking(m *telegram.NewMessage) error {
+	if !isAdmin(m) {
+		m.Reply("🚫 Not authorized.")
+		return nil
+	}
+	level := strings.TrimSpace(m.Args())
+	if level == "" {
+		m.Reply("ℹ️ Usage: `/setthinking <minimal|low|medium|high|max|off>`\n`max` maps to `high`. `off` uses `minimal` (or `low` on models that reject minimal).", &telegram.SendOptions{ParseMode: "Markdown"})
+		return nil
+	}
+	if err := aichat.SaveThinkingLevel(level); err != nil {
+		m.Reply(fmt.Sprintf("❌ %v", err))
+		return nil
+	}
+	model := db.GetRuntimeModel("default", config.DefaultModel)
+	prefs := aichat.LoadThinkingPrefs()
+	m.Reply(fmt.Sprintf("✅ Thinking level stored as `%s`\nModel: `%s`\nEffective: `%s`\nStream: `%v`",
+		prefs.Level, model, aichat.EffectiveThinkingLevel(model, prefs.Level), prefs.Stream),
+		&telegram.SendOptions{ParseMode: "Markdown"})
+	return nil
+}
+
+func handleGetThinking(m *telegram.NewMessage) error {
+	if !isAdmin(m) {
+		m.Reply("🚫 Not authorized.")
+		return nil
+	}
+	model := db.GetRuntimeModel("default", config.DefaultModel)
+	prefs := aichat.LoadThinkingPrefs()
+	stored := prefs.Level
+	if stored == "" {
+		stored = "(model default)"
+	}
+	msg := fmt.Sprintf(
+		"🧠 **Thinking**\n\nStored: `%s`\nEffective on `%s`: `%s`\nStream thoughts: `%v`\n\nLevels: `minimal` `low` `medium` `high` `max` `off`\nGemini 3.8/3.7 Flash: low/medium/high (no minimal)\n3.1 Pro: low/medium/high (can't disable)\nFlash-Lite: minimal–high",
+		stored, model, aichat.EffectiveThinkingLevel(model, prefs.Level), prefs.Stream,
+	)
+	m.Reply(msg, &telegram.SendOptions{ParseMode: "Markdown"})
+	return nil
+}
+
+func handleThinkStream(m *telegram.NewMessage) error {
+	if !isAdmin(m) {
+		m.Reply("🚫 Not authorized.")
+		return nil
+	}
+	arg := strings.ToLower(strings.TrimSpace(m.Args()))
+	var on bool
+	switch arg {
+	case "on", "true", "1", "enable", "yes":
+		on = true
+	case "off", "false", "0", "disable", "no":
+		on = false
+	default:
+		m.Reply("ℹ️ Usage: `/thinkstream on|off`", &telegram.SendOptions{ParseMode: "Markdown"})
+		return nil
+	}
+	if err := aichat.SaveThinkStream(on); err != nil {
+		m.Reply(fmt.Sprintf("❌ Failed: %v", err))
+		return nil
+	}
+	if on {
+		m.Reply("✅ Thought streaming **on** — Gemini headings will edit the placeholder as it thinks.", &telegram.SendOptions{ParseMode: "Markdown"})
+	} else {
+		m.Reply("✅ Thought streaming **off**.")
+	}
 	return nil
 }
 
@@ -216,16 +288,16 @@ func handleSudoers(m *telegram.NewMessage) error {
 		m.Reply("🚫 Not authorized.")
 		return nil
 	}
-	
+
 	args := strings.Fields(m.Args())
 	if len(args) == 0 {
 		m.Reply("ℹ️ Usage: `/sudoers add|remove` (adds/removes current chat for startup/shutdown messages)", &telegram.SendOptions{ParseMode: "Markdown"})
 		return nil
 	}
-	
+
 	action := strings.ToLower(args[0])
 	chatID := m.ChatID()
-	
+
 	if action == "add" {
 		_, err := db.Pool.Exec(context.Background(), `INSERT INTO startup_chats (chat_id) VALUES ($1) ON CONFLICT DO NOTHING`, chatID)
 		if err != nil {
