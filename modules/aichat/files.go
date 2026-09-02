@@ -152,7 +152,7 @@ func saveFileMeta(ctx context.Context, f *UploadedFile) error {
 	return err
 }
 
-func ensureFileOnGCS(ctx context.Context, msg *telegram.NewMessage) (*UploadedFile, error) {
+func ensureFileOnGCS(ctx context.Context, msg *telegram.NewMessage, prog *progress) (*UploadedFile, error) {
 	if msg == nil || msg.Media() == nil {
 		return nil, fmt.Errorf("no media")
 	}
@@ -160,12 +160,14 @@ func ensureFileOnGCS(ctx context.Context, msg *telegram.NewMessage) (*UploadedFi
 	msgID := msg.ID
 
 	if existing, err := lookupFile(ctx, chatID, msgID); err == nil && existing != nil && existing.GoogleFileURI != "" {
+		prog.step("Checking upload")
 		if fileProbablyLive(existing.UploadedAt) || gcsObjectExists(ctx, existing.GoogleFileURI) {
 			return existing, nil
 		}
 	}
 
 	log.Printf("[AiChat] Downloading media from Telegram for msg ID %d...", msgID)
+	prog.step("Downloading media")
 	data, mime, fileName := downloadMedia(msg)
 	if data == nil {
 		return nil, fmt.Errorf("failed to download media")
@@ -175,6 +177,7 @@ func ensureFileOnGCS(ctx context.Context, msg *telegram.NewMessage) (*UploadedFi
 		fileName = "file"
 	}
 
+	prog.step("Uploading")
 	uri, err := gcsUpload(ctx, gcsObjectName(chatID, msgID, fileName), mime, data)
 	if err != nil {
 		return nil, fmt.Errorf("gcs upload: %w", err)
@@ -196,7 +199,7 @@ func ensureFileOnGCS(ctx context.Context, msg *telegram.NewMessage) (*UploadedFi
 	return f, nil
 }
 
-func fileContext(ctx context.Context, msg *telegram.NewMessage, attach bool) (string, []*genai.Part) {
+func fileContext(ctx context.Context, msg *telegram.NewMessage, attach bool, prog *progress) (string, []*genai.Part) {
 	if msg == nil || msg.Media() == nil {
 		return "", nil
 	}
@@ -204,7 +207,7 @@ func fileContext(ctx context.Context, msg *telegram.NewMessage, attach bool) (st
 	var f *UploadedFile
 	var err error
 	if attach {
-		f, err = ensureFileOnGCS(ctx, msg)
+		f, err = ensureFileOnGCS(ctx, msg, prog)
 	} else {
 		f, err = lookupFile(ctx, msg.ChatID(), msg.ID)
 		if err != nil || f == nil {
@@ -236,7 +239,7 @@ func fileContext(ctx context.Context, msg *telegram.NewMessage, attach bool) (st
 	return note + " (not a native Gemini type — call view_file with this file_id if you need it)", nil
 }
 
-func replyContext(ctx context.Context, chatID int64, msgID int32) (string, []*genai.Part) {
+func replyContext(ctx context.Context, chatID int64, msgID int32, prog *progress) (string, []*genai.Part) {
 	if botClient == nil || msgID == 0 {
 		return "", nil
 	}
@@ -253,7 +256,7 @@ func replyContext(ctx context.Context, chatID int64, msgID int32) (string, []*ge
 		preview = "(media)"
 	}
 	head := fmt.Sprintf("[Replying to msg %d by %s: %s]", rm.ID, getSenderFromMessage(&rm), preview)
-	note, parts := fileContext(ctx, &rm, true)
+	note, parts := fileContext(ctx, &rm, true, prog)
 	if note != "" {
 		head += "\n" + note
 	}

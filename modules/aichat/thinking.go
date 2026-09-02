@@ -298,3 +298,44 @@ func editStatus(msg *telegram.NewMessage, text string) {
 		}
 	}
 }
+
+type progress struct {
+	msg      *telegram.NewMessage
+	steps    []string
+	lastText string
+}
+
+func newProgress(msg *telegram.NewMessage) *progress {
+	return &progress{msg: msg, lastText: "..."}
+}
+
+func (p *progress) step(label string) {
+	if p == nil || label == "" {
+		return
+	}
+	if n := len(p.steps); n > 0 && p.steps[n-1] == label {
+		return
+	}
+	p.steps = append(p.steps, label)
+	if len(p.steps) > 5 {
+		p.steps = p.steps[len(p.steps)-5:]
+	}
+	p.flush()
+}
+
+func (p *progress) flush() {
+	if p == nil || p.msg == nil {
+		return
+	}
+	text := "..."
+	if len(p.steps) > 0 {
+		text = "...\n" + strings.Join(p.steps, " › ")
+	}
+	if text == p.lastText {
+		return
+	}
+	p.lastText = text
+	if _, err := p.msg.Edit(text); err != nil {
+		log.Printf("[AiChat] progress edit failed: %v", err)
+	}
+}

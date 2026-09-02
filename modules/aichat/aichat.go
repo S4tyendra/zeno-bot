@@ -295,17 +295,21 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 
-	contents, err := buildDynamicTurns(ctx, m, query, limit)
-	if err != nil {
-		log.Printf("[AiChat] Failed to build turns: %v", err)
-		return nil
-	}
-
 	placeholder, err := m.Reply("...")
 	if err != nil {
 		log.Printf("[AiChat] Failed to send placeholder: %v", err)
 		return nil
 	}
+	prog := newProgress(placeholder)
+
+	contents, err := buildDynamicTurns(ctx, m, query, limit, prog)
+	if err != nil {
+		log.Printf("[AiChat] Failed to build turns: %v", err)
+		editStatus(placeholder, "❌ Couldn't load chat context.")
+		return nil
+	}
+
+	prog.step("Thinking")
 
 	responseText, sourcesURL, err := processWithFunctionCalling(ctx, contents, chatID, m.ID, placeholder)
 	if err != nil {
@@ -337,10 +341,11 @@ func utf16Slice(s string, offset, length int32) string {
 	return string(utf16.Decode(u[start:end]))
 }
 
-func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string, limit int) ([]*genai.Content, error) {
+func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string, limit int, prog *progress) ([]*genai.Content, error) {
 	chatID := m.ChatID()
 	replyToMsgID := m.ReplyToMsgID()
 
+	prog.step("Loading chat")
 	history := fetchTelegramHistory(chatID, m.ID, limit)
 	history = append(history, *m)
 
@@ -405,7 +410,7 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 
 		var mediaParts []*genai.Part
 		if !isBot && msg.Media() != nil {
-			note, parts := fileContext(ctx, &msg, isCurrent)
+			note, parts := fileContext(ctx, &msg, isCurrent, prog)
 			if note != "" {
 				msgText = note + "\n" + msgText
 			}
@@ -413,7 +418,7 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 		}
 
 		if isCurrent && replyToMsgID != 0 {
-			rNote, rParts := replyContext(ctx, chatID, replyToMsgID)
+			rNote, rParts := replyContext(ctx, chatID, replyToMsgID, prog)
 			if rNote != "" {
 				msgText = rNote + "\n" + msgText
 			}
@@ -451,6 +456,7 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 		if err == nil && len(toolHist.ToolCalls) > 0 {
 			if toolHist.ToolCalls[0].ThoughtSignature == "" {
 				log.Printf("[AiChat] skipping unsigned tool history for msg %d (%d calls)", msgID, len(toolHist.ToolCalls))
+				prog.step("skipping unsigned tool history")
 				continue
 			}
 			var modelParts []*genai.Part

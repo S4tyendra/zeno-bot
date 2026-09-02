@@ -613,7 +613,7 @@ func reloadTelegramFile(chatID int64, msgID int32) map[string]any {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	f, err := ensureFileOnGCS(ctx, &msg)
+	f, err := ensureFileOnGCS(ctx, &msg, nil)
 	if err != nil {
 		return map[string]any{"success": false, "error": err.Error()}
 	}
