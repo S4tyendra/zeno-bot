@@ -33,6 +33,7 @@ var (
 	TelegraphAccessToken    string
 	PerplexityJWT           string
 	ExchangeRateAPIKey      string
+	LogChannel              int64
 )
 
 func Load() {
@@ -129,6 +130,10 @@ func Load() {
 	TelegraphAccessToken = os.Getenv("TELEGRAPH_ACCESS_TOKEN")
 	PerplexityJWT = os.Getenv("PERPLEXITY_JWT")
 	ExchangeRateAPIKey = os.Getenv("EXCHANGERATE_API_KEY")
+
+	if s := strings.TrimSpace(os.Getenv("LOG_CHANNEL")); s != "" {
+		LogChannel, _ = strconv.ParseInt(s, 10, 64)
+	}
 }
 
 func PostgresDSN() string {

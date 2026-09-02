@@ -19,12 +19,23 @@ var (
 )
 
 type streamAcc struct {
-	parts     []*genai.Part
-	grounding *genai.GroundingMetadata
+	parts        []*genai.Part
+	grounding    *genai.GroundingMetadata
+	usage        *genai.GenerateContentResponseUsageMetadata
+	modelVersion string
 }
 
 func (a *streamAcc) add(resp *genai.GenerateContentResponse, thoughts *thoughtStreamer) {
-	if resp == nil || len(resp.Candidates) == 0 {
+	if resp == nil {
+		return
+	}
+	if resp.UsageMetadata != nil {
+		a.usage = resp.UsageMetadata
+	}
+	if resp.ModelVersion != "" {
+		a.modelVersion = resp.ModelVersion
+	}
+	if len(resp.Candidates) == 0 {
 		return
 	}
 	c := resp.Candidates[0]

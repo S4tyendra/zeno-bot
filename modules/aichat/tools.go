@@ -406,12 +406,16 @@ func executeCreateImage(args map[string]any) map[string]any {
 				}
 
 				log.Printf("[AiChat] Image saved to %s (%d bytes)", filePath, len(part.InlineData.Data))
-				return map[string]any{
+				out := map[string]any{
 					"success":   true,
 					"file_path": filePath,
 					"prompt":    prompt,
 					"size":      len(part.InlineData.Data),
 				}
+				if resp.UsageMetadata != nil {
+					out["_usage"] = resp.UsageMetadata
+				}
+				return out
 			}
 		}
 	}

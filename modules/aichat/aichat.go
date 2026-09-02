@@ -311,7 +311,10 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 
 	prog.step("Thinking")
 
-	responseText, sourcesURL, err := processWithFunctionCalling(ctx, contents, chatID, m.ID, placeholder)
+	start := time.Now()
+	responseText, sourcesURL, usage, err := processWithFunctionCalling(ctx, contents, chatID, m.ID, placeholder)
+	usage.Elapsed = time.Since(start)
+	go postAIUsageLog(m, query, usage, err)
 	if err != nil {
 		log.Printf("[AiChat] GenAI error: %v", err)
 		editStatus(placeholder, fmt.Sprintf("❌ Google failed after retries: `%s`", truncateString(err.Error(), 180)))
@@ -536,7 +539,7 @@ func getMemoriesForUsers(ctx context.Context, userIDs []int64) (map[int64][]Memo
 func publicToolResult(r map[string]any) map[string]any {
 	out := make(map[string]any, len(r))
 	for k, v := range r {
-		if k == "_attach" {
+		if k == "_attach" || k == "_usage" {
 			continue
 		}
 		out[k] = v
@@ -628,9 +631,10 @@ func sendLargeResponse(m *telegram.NewMessage, placeholder *telegram.NewMessage,
 	return nil
 }
 
-func processWithFunctionCalling(ctx context.Context, contents []*genai.Content, chatID int64, currentMsgID int32, placeholder *telegram.NewMessage) (string, string, error) {
+func processWithFunctionCalling(ctx context.Context, contents []*genai.Content, chatID int64, currentMsgID int32, placeholder *telegram.NewMessage) (string, string, usageAcc, error) {
 	model := db.GetRuntimeModel("default", config.DefaultModel)
 	prefs := LoadThinkingPrefs()
+	usage := usageAcc{Model: model, Thinking: prefs.Level, Stream: prefs.Stream}
 
 	configAI := &genai.GenerateContentConfig{
 		SystemInstruction: &genai.Content{
@@ -664,13 +668,17 @@ func processWithFunctionCalling(ctx context.Context, contents []*genai.Content, 
 		acc, err := generateWithRetry(ctx, model, contents, configAI, status, thoughts)
 		if err != nil {
 			log.Printf("[AiChat] generate failed inventory=%s err=%v", summarizeContents(contents), err)
-			return "", "", err
+			return "", "", usage, err
+		}
+		usage.add(acc.usage)
+		if acc.modelVersion != "" {
+			usage.Version = acc.modelVersion
 		}
 
 		modelContent := acc.modelContent()
 		if modelContent == nil {
 			if finalText.Len() == 0 {
-				return "AI returned no response.", "", nil
+				return "AI returned no response.", "", usage, nil
 			}
 			break
 		}
@@ -704,6 +712,10 @@ func processWithFunctionCalling(ctx context.Context, contents []*genai.Content, 
 			result := executeFunctionCall(fc, chatID, currentMsgID)
 			if attach, ok := result["_attach"].([]*genai.Part); ok {
 				extraParts = append(extraParts, attach...)
+			}
+			if um, ok := result["_usage"].(*genai.GenerateContentResponseUsageMetadata); ok {
+				usage.add(um)
+				usage.ImageCalls++
 			}
 			pub := publicToolResult(result)
 
@@ -748,7 +760,7 @@ func processWithFunctionCalling(ctx context.Context, contents []*genai.Content, 
 	if out == "" {
 		out = "AI returned no response."
 	}
-	return out, sourcesURL, nil
+	return out, sourcesURL, usage, nil
 }
 
 func summarizeContents(contents []*genai.Content) string {
