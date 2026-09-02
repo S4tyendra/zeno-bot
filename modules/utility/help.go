@@ -16,6 +16,14 @@ Here are the available commands:
 • @ask <query or reply> - /ask (alias)
 • Reply to a message (text or media) with @ask — the reply target is shown to the AI
 
+**Downloader**
+• /download <url> or reply to media (alias: /dl)
+• /fastdownload <url> - aria2c 16 connections (alias: /fastdl)
+• /ytdlp <url> - YouTube, Instagram, or m3u8
+• /rename <id> <name> - rename a completed download
+• /upload <id> [auto|video|doc|file|audio|photo]
+• /tasks - queue  •  /cancel <id>
+
 **Utilities**
 • /math <expr> - Math, Unit & Currency conversion
   _(Note: 'KB', 'MB' = Bytes; Use 'kbit', 'mbit' for Bits. All data units are 1024-based)_

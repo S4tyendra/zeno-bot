@@ -83,6 +83,25 @@ var schemaStatements = []string{
 		afk_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		reason TEXT NOT NULL DEFAULT ''
 	)`,
+	`CREATE TABLE IF NOT EXISTS download_tasks (
+		id SERIAL PRIMARY KEY,
+		task_type TEXT NOT NULL,
+		chat_id BIGINT NOT NULL,
+		reply_msg_id INTEGER NOT NULL DEFAULT 0,
+		status_msg_id INTEGER NOT NULL DEFAULT 0,
+		user_id BIGINT NOT NULL,
+		url_or_path TEXT NOT NULL,
+		custom_name TEXT NOT NULL DEFAULT '',
+		file_path TEXT NOT NULL DEFAULT '',
+		file_size BIGINT NOT NULL DEFAULT 0,
+		status TEXT NOT NULL DEFAULT 'queued',
+		error_msg TEXT NOT NULL DEFAULT '',
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_download_tasks_status_id ON download_tasks (status, id ASC)`,
+	`CREATE INDEX IF NOT EXISTS idx_download_tasks_chat_reply ON download_tasks (chat_id, reply_msg_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_download_tasks_chat_status ON download_tasks (chat_id, status_msg_id)`,
 }
 
 func Connect() {
