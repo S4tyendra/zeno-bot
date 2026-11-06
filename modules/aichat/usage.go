@@ -26,6 +26,7 @@ type usageAcc struct {
 	Stream     bool
 	Elapsed    time.Duration
 	ImageCalls int
+	Fallback   string // lite model used after the default kept failing
 }
 
 func (u *usageAcc) add(m *genai.GenerateContentResponseUsageMetadata) {
@@ -132,6 +133,9 @@ func formatUsageLog(m *telegram.NewMessage, query string, u usageAcc, genErr err
 	fmt.Fprintf(&b, "Model: `%s`\n", u.Model)
 	if u.Version != "" && u.Version != u.Model {
 		fmt.Fprintf(&b, "Version: `%s`\n", u.Version)
+	}
+	if u.Fallback != "" {
+		fmt.Fprintf(&b, "Fallback: `%s` (cost shown at default-model rates)\n", u.Fallback)
 	}
 	fmt.Fprintf(&b, "Thinking: `%s` · stream `%s`\n", thinking, stream)
 	fmt.Fprintf(&b, "Chat: `%s` · User: %s\n", ensureGroupPrefix(m.ChatID()), getSenderName(m))

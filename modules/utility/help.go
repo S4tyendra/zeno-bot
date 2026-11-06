@@ -43,8 +43,9 @@ func handleHelp(m *telegram.NewMessage) error {
 • /logs [n] — last n container log lines (default 50)
 • /allowai — allow this group, or reply to allow that user anywhere
 • /noallowai — revoke this group, or reply to revoke that user
-• /getmodel — current default / image / highimage models
-• /setmodel <default|image|highimage> <model_name>
+• /getmodel — current default / lite / image / highimage models
+• /setmodel <default|lite|image|highimage> <model_name>
+  lite = fallback after the default model fails 3×
 • /getthinking — stored + effective thinking level, stream flag
 • /setthinking <minimal|low|medium|high|max|off>
   max → high. off → minimal (or low if the model rejects minimal)
@@ -60,6 +61,7 @@ func handleHelp(m *telegram.NewMessage) error {
 • ` + "`/download https://example.com/file.mp4`" + `
 • ` + "`/ytdlp https://youtube.com/watch?v=...`" + `
 • ` + "`/setmodel default gemini-3.1-pro`" + `
+• ` + "`/setmodel lite gemini-3.5-flash-lite`" + `
 • ` + "`/setthinking high`" + `
 • ` + "`/thinkstream on`" + `
 `

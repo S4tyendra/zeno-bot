@@ -176,16 +176,16 @@ func handleSetModel(m *telegram.NewMessage) error {
 	}
 	args := strings.Fields(m.Args())
 	if len(args) < 2 {
-		m.Reply("ℹ️ Usage: `/setmodel <default|image|highimage> <model_name>`", &telegram.SendOptions{ParseMode: "Markdown"})
+		m.Reply("ℹ️ Usage: `/setmodel <default|lite|image|highimage> <model_name>`\n`lite` = fallback model used after the default fails 3× (execution-focused prompt)", &telegram.SendOptions{ParseMode: "Markdown"})
 		return nil
 	}
 	key := args[0]
 	modelName := args[1]
 
 	switch strings.ToLower(key) {
-	case "default", "image", "highimage":
+	case "default", "lite", "image", "highimage":
 	default:
-		m.Reply("❌ Invalid model key. Use `default`, `image`, or `highimage`.", &telegram.SendOptions{ParseMode: "Markdown"})
+		m.Reply("❌ Invalid model key. Use `default`, `lite`, `image`, or `highimage`.", &telegram.SendOptions{ParseMode: "Markdown"})
 		return nil
 	}
 
@@ -208,8 +208,9 @@ func handleGetModel(m *telegram.NewMessage) error {
 	def := db.GetRuntimeModel("default", config.DefaultModel)
 	img := db.GetRuntimeModel("image", config.ImageModel)
 	himg := db.GetRuntimeModel("highimage", config.HighImageModel)
+	lite := db.GetRuntimeModel("lite", config.LiteModel)
 
-	msg := fmt.Sprintf("🤖 **Current Models**\n\nDefault: `%s`\nImage: `%s`\nHighImage: `%s`", def, img, himg)
+	msg := fmt.Sprintf("🤖 **Current Models**\n\nDefault: `%s`\nLite (fallback): `%s`\nImage: `%s`\nHighImage: `%s`", def, lite, img, himg)
 	m.Reply(msg, &telegram.SendOptions{ParseMode: "Markdown"})
 	return nil
 }

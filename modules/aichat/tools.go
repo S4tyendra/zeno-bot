@@ -356,7 +356,8 @@ func executeCreateImage(args map[string]any) map[string]any {
 
 	log.Printf("[AiChat] Generating image with model %s (high=%v, aspect=%s): %s", model, highQuality, aspectRatio, prompt)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	// Image models are slow (4K especially); give them room.
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 
 	if aspectRatio == "" {
@@ -376,7 +377,19 @@ func executeCreateImage(args map[string]any) map[string]any {
 		},
 	}
 
-	resp, err := genaiClient.Models.GenerateContent(ctx, model, genai.Text(prompt), imgConfig)
+	var resp *genai.GenerateContentResponse
+	var err error
+	for attempt, gaps := 0, []time.Duration{3 * time.Second, 8 * time.Second}; ; attempt++ {
+		resp, err = genaiClient.Models.GenerateContent(ctx, model, genai.Text(prompt), imgConfig)
+		if err == nil || attempt >= len(gaps) || !isRetryable(err) || isPermanent(err) {
+			break
+		}
+		log.Printf("[AiChat] Image generation attempt %d failed, retrying in %s: %v", attempt+1, gaps[attempt], err)
+		select {
+		case <-time.After(gaps[attempt]):
+		case <-ctx.Done():
+		}
+	}
 	if err != nil {
 		log.Printf("[AiChat] Image generation failed: %v", err)
 		return map[string]any{"success": false, "error": err.Error()}
@@ -615,7 +628,8 @@ func reloadTelegramFile(chatID int64, msgID int32) map[string]any {
 	if msg.Media() == nil {
 		return map[string]any{"success": false, "error": "that message has no file"}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	// Image models are slow (4K especially); give them room.
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	f, err := ensureFileOnGCS(ctx, &msg, nil)
 	if err != nil {

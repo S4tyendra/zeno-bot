@@ -52,7 +52,8 @@ You are Intelligent, a 22-year-old girl from India. You talk like a real human �
 You're not just a pretty texter — you can actually do shit. Code, search, send files, generate images, manage memories, read chats. USE THE TOOLS. Don't just describe what to do — do it.
 
 - **send_file**: Send a file to the user. Params: file_path (required), caption (optional).
-- **run_code**: Execute code in a sandboxed container. Params: language (python/bash/javascript), code.
+- **run_code**: Execute code in a sandboxed container. Params: language (python/bash), code. Jobs longer than ~20s go to the background: reply with one short line (never an empty reply), and when the job finishes you get its output as a <system_event> in a new turn — continue the task from there (next step, send_file, or fix + retry). Don't poll it.
+- **Never end your turn with an empty reply.** After tools, always either call the next tool or say something.
 - **get_latest_data**: Search the web for real-time info. Params: query (required). Use this for current events, news, prices, weather — anything that needs fresh data. Don't hallucinate.
 - **memory_manager**: Add, edit, or delete memories about users. Params: action (add/edit/delete), userid (string), text (string), index (int).
 - **file_actions**: Read, create, edit, or upload files in container storage. Params: action (read/create/edit/upload), file_path, content, find, replace.
@@ -289,10 +290,17 @@ func handleMessage(m *telegram.NewMessage) error {
 }
 
 func processAIRequest(m *telegram.NewMessage, query string) error {
+	return runAITurn(m, query, "")
+}
+
+// runAITurn answers m in a fresh placeholder reply. followUp, when set, is
+// appended as a system note after the rebuilt history (used to hand finished
+// background-task output back to the model so it can continue).
+func runAITurn(m *telegram.NewMessage, query, followUp string) error {
 	chatID := m.ChatID()
 	limit := 50
 
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	defer cancel()
 
 	placeholder, err := m.Reply("...")
@@ -308,6 +316,12 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 		editStatus(placeholder, "❌ Couldn't load chat context.")
 		return nil
 	}
+	if followUp != "" {
+		contents = append(contents, &genai.Content{
+			Role:  genai.RoleUser,
+			Parts: []*genai.Part{{Text: followUp}},
+		})
+	}
 
 	prog.step("Thinking")
 
@@ -318,6 +332,12 @@ func processAIRequest(m *telegram.NewMessage, query string) error {
 	if err != nil {
 		log.Printf("[AiChat] GenAI error: %v", err)
 		editStatus(placeholder, fmt.Sprintf("❌ Google failed after retries: `%s`", truncateString(err.Error(), 180)))
+		return nil
+	}
+
+	if strings.TrimSpace(responseText) == "" {
+		// Model finished by delivering a file/message itself; nothing to say.
+		placeholder.Delete()
 		return nil
 	}
 
@@ -398,6 +418,10 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 	for _, msg := range history {
 		senderID := msg.SenderID()
 		isBot := senderID == botUserID
+		if isBot && isJunkBotMessage(msg.Text()) {
+			// Old failure placeholders teach the model that empty replies are normal.
+			continue
+		}
 		isCurrent := msg.ID == m.ID
 		msgID := msg.ID
 
@@ -631,6 +655,36 @@ func sendLargeResponse(m *telegram.NewMessage, placeholder *telegram.NewMessage,
 	return nil
 }
 
+// isJunkBotMessage: bot messages that are status noise, not real replies.
+func isJunkBotMessage(text string) bool {
+	t := strings.TrimSpace(text)
+	switch {
+	case t == "AI returned no response.", t == "...", strings.HasPrefix(t, "...\n"):
+		return true
+	case strings.HasPrefix(t, "❌ Google failed"), strings.HasPrefix(t, "⏳ Google"):
+		return true
+	}
+	return false
+}
+
+// deliveringTools put something in front of the user themselves, so an empty
+// text reply right after them is a legit "done".
+var deliveringTools = map[string]bool{"send_file": true, "send_to_chat": true}
+
+func toolStatus(name string) string {
+	switch name {
+	case "create_image":
+		return "🎨 Generating image… (takes ~30-90s)"
+	case "run_code":
+		return "💻 Running code…"
+	case "get_latest_data":
+		return "🔍 Searching…"
+	case "send_file":
+		return "📤 Sending file…"
+	}
+	return fmt.Sprintf("🔧 Calling `%s`...", name)
+}
+
 func processWithFunctionCalling(ctx context.Context, contents []*genai.Content, chatID int64, currentMsgID int32, placeholder *telegram.NewMessage) (string, string, usageAcc, error) {
 	model := db.GetRuntimeModel("default", config.DefaultModel)
 	prefs := LoadThinkingPrefs()
@@ -655,31 +709,46 @@ func processWithFunctionCalling(ctx context.Context, contents []*genai.Content, 
 		ResponseModalities: []string{"TEXT"},
 	}
 
+	lite := liteModelName()
+	plan := &genPlan{
+		primary:    model,
+		primaryCfg: configAI,
+		lite:       lite,
+		liteCfg:    liteConfigFrom(configAI, lite, prefs),
+	}
+
 	status := func(s string) { editStatus(placeholder, s) }
-	maxIterations := 6
+	maxIterations := 10
 	var finalText strings.Builder
 	var sourcesURL string
+	var toolsUsed []string
+	delivered := false
 
 	for i := 0; i < maxIterations; i++ {
+		curModel, _ := plan.current()
 		log.Printf("[AiChat] Function calling iteration %d, contents count: %d model=%s thinking=%q stream=%v parts=%s",
-			i+1, len(contents), model, prefs.Level, prefs.Stream, summarizeContents(contents))
+			i+1, len(contents), curModel, prefs.Level, prefs.Stream, summarizeContents(contents))
 
 		thoughts := &thoughtStreamer{msg: placeholder, enabled: prefs.Stream}
-		acc, err := generateWithRetry(ctx, model, contents, configAI, status, thoughts)
+		acc, err := plan.generate(ctx, contents, status, thoughts, delivered)
 		if err != nil {
 			log.Printf("[AiChat] generate failed inventory=%s err=%v", summarizeContents(contents), err)
+			if finalText.Len() > 0 || delivered {
+				// Partial success: keep what we already have instead of a hard error.
+				break
+			}
 			return "", "", usage, err
 		}
 		usage.add(acc.usage)
 		if acc.modelVersion != "" {
 			usage.Version = acc.modelVersion
 		}
+		if plan.onLite {
+			usage.Fallback = plan.lite
+		}
 
 		modelContent := acc.modelContent()
 		if modelContent == nil {
-			if finalText.Len() == 0 {
-				return "AI returned no response.", "", usage, nil
-			}
 			break
 		}
 		contents = append(contents, modelContent)
@@ -704,10 +773,12 @@ func processWithFunctionCalling(ctx context.Context, contents []*genai.Content, 
 
 		var functionResponses []*genai.Part
 		var extraParts []*genai.Part
+		delivered = false
 		for _, p := range fcParts {
 			fc := p.FunctionCall
 			log.Printf("[AiChat] Function call: %s with args: %v sig=%d", fc.Name, fc.Args, len(p.ThoughtSignature))
-			status(fmt.Sprintf("🔧 Calling `%s`...", fc.Name))
+			status(toolStatus(fc.Name))
+			toolsUsed = append(toolsUsed, fc.Name)
 
 			result := executeFunctionCall(fc, chatID, currentMsgID)
 			if attach, ok := result["_attach"].([]*genai.Part); ok {
@@ -718,6 +789,9 @@ func processWithFunctionCalling(ctx context.Context, contents []*genai.Content, 
 				usage.ImageCalls++
 			}
 			pub := publicToolResult(result)
+			if ok, _ := pub["success"].(bool); ok && deliveringTools[fc.Name] {
+				delivered = true
+			}
 
 			saveToolCallHistory(ctx, chatID, currentMsgID, fc.Name, fc.Args, pub, p.ThoughtSignature)
 
@@ -757,10 +831,26 @@ func processWithFunctionCalling(ctx context.Context, contents []*genai.Content, 
 	}
 
 	out := strings.TrimSpace(finalText.String())
-	if out == "" {
-		out = "AI returned no response."
+	if out == "" && !delivered {
+		if len(toolsUsed) == 0 {
+			return "", sourcesURL, usage, errEmpty
+		}
+		// Hit the iteration cap mid-work: say so instead of a blank reply.
+		out = fmt.Sprintf("😮‍💨 ran out of steps mid-task (used: `%s`). reply \"continue\" and i'll pick it up.", strings.Join(dedupe(toolsUsed), "`, `"))
 	}
 	return out, sourcesURL, usage, nil
+}
+
+func dedupe(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func summarizeContents(contents []*genai.Content) string {

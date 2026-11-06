@@ -30,6 +30,7 @@ var (
 	DefaultModel            string
 	ImageModel              string
 	HighImageModel          string
+	LiteModel               string
 	TelegraphAccessToken    string
 	PerplexityJWT           string
 	ExchangeRateAPIKey      string
@@ -125,6 +126,11 @@ func Load() {
 	HighImageModel = os.Getenv("HIGH_IMAGE_MODEL")
 	if HighImageModel == "" {
 		HighImageModel = "gemini-3.1-flash-image-preview"
+	}
+
+	LiteModel = os.Getenv("LITE_MODEL")
+	if LiteModel == "" {
+		LiteModel = "gemini-3.5-flash-lite"
 	}
 
 	TelegraphAccessToken = os.Getenv("TELEGRAPH_ACCESS_TOKEN")
