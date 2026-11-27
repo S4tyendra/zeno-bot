@@ -51,6 +51,8 @@ func handleHelp(m *telegram.NewMessage) error {
   max → high. off → minimal (or low if the model rejects minimal)
 • /thinkstream on|off — stream Gemini thought headings live
 • /sudoers add|remove — this chat gets startup/shutdown broadcasts
+• /pin [silent] — reply to a message to pin it
+• /unpin — reply to a pinned message to unpin it
 
 **Examples:**
 • ` + "`/math 100 USD to INR`" + `

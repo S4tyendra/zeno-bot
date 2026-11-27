@@ -39,6 +39,8 @@ func Register(client *telegram.Client) {
 	client.On("cmd:getthinking", handleGetThinking)
 	client.On("cmd:thinkstream", handleThinkStream)
 	client.On("cmd:sudoers", handleSudoers)
+	client.On("cmd:pin", handlePin)
+	client.On("cmd:unpin", handleUnpin)
 }
 
 func handleLogs(m *telegram.NewMessage) error {
