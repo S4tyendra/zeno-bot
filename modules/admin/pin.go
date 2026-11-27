@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"fmt"
 	"log"
 	"strings"
 
@@ -83,11 +82,11 @@ func canPin(m *telegram.NewMessage) bool {
 //   - /pin silent|s|quiet (reply) -> pin silently
 func handlePin(m *telegram.NewMessage) error {
 	if !canPin(m) {
-		m.Reply("🚫 Not authorized.")
+		log.Printf("[Admin] /pin unauthorized in chat %d by %d", m.ChatID(), m.SenderID())
 		return nil
 	}
 	if m.ReplyToMsgID() == 0 {
-		m.Reply("ℹ️ Reply to the message you want to pin.")
+		log.Printf("[Admin] /pin ignored (no reply) in chat %d by %d", m.ChatID(), m.SenderID())
 		return nil
 	}
 
@@ -95,7 +94,7 @@ func handlePin(m *telegram.NewMessage) error {
 	silent := arg == "silent" || arg == "s" || arg == "quiet"
 
 	if _, err := m.Client.PinMessage(m.ChatID(), m.ReplyToMsgID(), &telegram.PinOptions{Silent: silent}); err != nil {
-		m.Reply(fmt.Sprintf("❌ Failed to pin message: %v", err))
+		log.Printf("[Admin] /pin failed for msg %d in chat %d by %d: %v", m.ReplyToMsgID(), m.ChatID(), m.SenderID(), err)
 		return nil
 	}
 
@@ -107,21 +106,20 @@ func handlePin(m *telegram.NewMessage) error {
 // handleUnpin unpins the replied-to message.
 func handleUnpin(m *telegram.NewMessage) error {
 	if !canPin(m) {
-		m.Reply("🚫 Not authorized.")
+		log.Printf("[Admin] /unpin unauthorized in chat %d by %d", m.ChatID(), m.SenderID())
 		return nil
 	}
 	if m.ReplyToMsgID() == 0 {
-		m.Reply("ℹ️ Reply to the message you want to unpin.")
+		log.Printf("[Admin] /unpin ignored (no reply) in chat %d by %d", m.ChatID(), m.SenderID())
 		return nil
 	}
 
 	if _, err := m.Client.PinMessage(m.ChatID(), m.ReplyToMsgID(), &telegram.PinOptions{Unpin: true}); err != nil {
-		m.Reply(fmt.Sprintf("❌ Failed to unpin message: %v", err))
+		log.Printf("[Admin] /unpin failed for msg %d in chat %d by %d: %v", m.ReplyToMsgID(), m.ChatID(), m.SenderID(), err)
 		return nil
 	}
 
 	log.Printf("[Admin] /unpin msg %d in chat %d by %d", m.ReplyToMsgID(), m.ChatID(), m.SenderID())
-	m.Reply("✅ Message unpinned.")
 	deleteTriggeringCommand(m)
 	return nil
 }
