@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/amarnathcjd/gogram/telegram"
+
+	"zeno/connectors"
 	"zeno/db"
 )
 
@@ -241,10 +243,38 @@ func processTask(task *DownloadTask) {
 		filePath, fileSize, execErr = DownloadAria2(taskCtx, task.ID, task.URLOrPath, task.CustomName, reporter)
 
 	case TaskTypeYTDLP:
-		filePath, fileSize, execErr = DownloadYtDlp(taskCtx, task.ID, task.URLOrPath, task.CustomName, isM3U8URL(task.URLOrPath), reporter)
+		filePath, fileSize, execErr = DownloadYtDlp(taskCtx, task.ID, task.UserID, task.URLOrPath, task.CustomName, isM3U8URL(task.URLOrPath), reporter)
 
 	case TaskTypeURL:
 		filePath, fileSize, execErr = DownloadHTTP(taskCtx, task.ID, task.URLOrPath, task.CustomName, reporter)
+
+	case TaskTypeS3:
+		var link string
+		link, fileSize, execErr = connectors.SaveRemote(taskCtx, task.UserID, task.URLOrPath, task.CustomName, func(written, total int64) {
+			pct := 0.0
+			if total > 0 {
+				pct = float64(written) / float64(total) * 100
+			}
+			reporter.Report(ProgressUpdate{
+				Action:     "Uploading to S3",
+				FileName:   task.CustomName,
+				Current:    written,
+				Total:      total,
+				Percentage: pct,
+			})
+		})
+		filePath = link
+
+	case TaskTypeS3Media:
+		var link string
+		link, _, fileSize, execErr = connectors.SaveYtDlp(taskCtx, task.UserID, "", task.URLOrPath, task.CustomName, func(line string) {
+			reporter.Report(ProgressUpdate{
+				Action:    "yt-dlp → S3",
+				RawStatus: line,
+				FileName:  task.CustomName,
+			})
+		})
+		filePath = link
 
 	case TaskTypeUpload:
 		mode := parseUploadMode(task.CustomName)
@@ -289,6 +319,28 @@ func processTask(task *DownloadTask) {
 		WHERE id = $3 AND status = 'processing'`, filePath, fileSize, task.ID)
 	if err != nil || tag.RowsAffected() == 0 {
 		log.Printf("[Downloader Queue] Task #%d completion skipped (already cancelled or missing)", task.ID)
+		return
+	}
+
+	if task.TaskType == TaskTypeS3 || task.TaskType == TaskTypeS3Media {
+		reporter.Finish(fmt.Sprintf("✅ <b>Task #%d is in your bucket</b>\n\n%s", task.ID, html.EscapeString(filePath)))
+		return
+	}
+
+	if task.TaskType == TaskTypeTG {
+		link, upSize, upErr := connectors.PutFile(taskCtx, task.UserID, filePath, filepath.Base(filePath))
+		_ = os.RemoveAll(taskDir(task.ID))
+		if upErr != nil {
+			_, _ = db.Pool.Exec(context.Background(), `
+				UPDATE download_tasks SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2`,
+				upErr.Error(), task.ID)
+			reporter.Finish(fmt.Sprintf("❌ <b>Task #%d Failed</b>\n\n<code>%s</code>", task.ID, html.EscapeString(upErr.Error())))
+			return
+		}
+		_, _ = db.Pool.Exec(context.Background(), `
+			UPDATE download_tasks SET file_path = $1, file_size = $2, updated_at = NOW() WHERE id = $3`,
+			link, upSize, task.ID)
+		reporter.Finish(fmt.Sprintf("✅ <b>Task #%d link</b>\n\n%s", task.ID, html.EscapeString(link)))
 		return
 	}
 

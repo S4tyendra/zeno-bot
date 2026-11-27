@@ -220,6 +220,97 @@ func init() {
 		}
 	}`), &viewFileParams)
 
+	var scheduleMessageParams genai.Schema
+	json.Unmarshal([]byte(`{
+		"type": "object",
+		"properties": {
+			"action": {
+				"type": "string",
+				"enum": ["list", "create", "edit", "delete"],
+				"description": "list: pending and failed schedules. create: queue a message. edit: change a pending schedule. delete: remove a pending schedule."
+			},
+			"chatid": {
+				"type": "integer",
+				"description": "list: optional, only that chat (omit for every chat). create: required destination chat id from known_chats."
+			},
+			"time": {
+				"type": "string",
+				"description": "create: when to run, ISO-8601. No timezone means IST (UTC+5:30). Example: 2026-11-19T21:30:00"
+			},
+			"message": {
+				"type": "string",
+				"description": "create: text to send, or the instruction for mode=ai."
+			},
+			"mode": {
+				"type": "string",
+				"enum": ["send", "ai"],
+				"description": "create: send posts message as text. ai wakes the assistant in that chat and message is the task. Default send."
+			},
+			"scheduledid": {
+				"type": "string",
+				"description": "edit/delete: id returned by create or list."
+			},
+			"new_time": {
+				"type": "string",
+				"description": "edit: new ISO-8601 send time (IST if no timezone). Omit to keep the current time."
+			},
+			"new_chatid": {
+				"type": "integer",
+				"description": "edit: new destination chat id. Omit to keep the current chat."
+			},
+			"new_message": {
+				"type": "string",
+				"description": "edit: replacement text. Omit to keep the current message."
+			},
+			"new_mode": {
+				"type": "string",
+				"enum": ["send", "ai"],
+				"description": "edit: switch between send and ai. Omit to keep the current mode."
+			}
+		},
+		"required": ["action"]
+	}`), &scheduleMessageParams)
+
+	var ytdlpParams genai.Schema
+	json.Unmarshal([]byte(`{
+		"type": "object",
+		"properties": {
+			"url": {"type": "string", "description": "Page or media URL. YouTube, Instagram, TikTok, Twitter, or a direct file."},
+			"name": {"type": "string", "description": "Optional output filename."}
+		},
+		"required": ["url"]
+	}`), &ytdlpParams)
+
+	var browserParams genai.Schema
+	json.Unmarshal([]byte(`{
+		"type": "object",
+		"properties": {
+			"action": {
+				"type": "string",
+				"enum": ["state", "text", "screenshot", "scroll", "click", "search", "newtab", "switch", "close", "download"],
+				"description": "state: open tabs. text: page text and buttons. screenshot: PNG. scroll: move the current tab. click: click selector or button text. search: DuckDuckGo. newtab: open url in a new tab. switch: index or url fragment. close: close current tab. download: S3 upload, not a tab."
+			},
+			"url": {"type": "string", "description": "Page URL. Omit to keep using the current tab."},
+			"query": {"type": "string", "description": "search: the query. switch: url or title fragment."},
+			"target": {"type": "string", "description": "click: CSS selector or visible button/link text."},
+			"index": {"type": "integer", "description": "switch: 1-based tab index from state."},
+			"pixels": {"type": "integer", "description": "scroll: pixels down. Default 900."},
+			"wait": {"type": "integer", "description": "Seconds to wait after navigation or before reading. Max 10."},
+			"name": {"type": "string", "description": "download: optional filename in the bucket."}
+		},
+		"required": ["action"]
+	}`), &browserParams)
+
+	var copyLinkParams genai.Schema
+	json.Unmarshal([]byte(`{
+		"type": "object",
+		"properties": {
+			"file_path": {"type": "string", "description": "Local file under /workspace, /app/generated, or /tmp."},
+			"file_id": {"type": "integer", "description": "Telegram message id of a file in this chat."},
+			"name": {"type": "string", "description": "Optional object name."}
+		}
+	}`), &copyLinkParams)
+
 	var publishArtifactParams genai.Schema
 	json.Unmarshal([]byte(`{
 		"type": "object",
@@ -250,11 +341,12 @@ func init() {
 					Description: "Execute code in a sandboxed container (computer). Has access to /generated (images) and /workspace. Available: python, bash. Output is truncated safely.",
 					Parameters:  &runCodeParams,
 				},
-				{
-					Name:        "get_latest_data",
-					Description: "Search the web for real-time, up-to-date information. Use when asked about current events, news, recent happenings, live scores, weather, or anything requiring fresh data. Returns answer with cited sources.",
-					Parameters:  &getLatestDataParams,
-				},
+				// get_latest_data (Perplexity web search) is dead. Unregistered on purpose.
+				// {
+				// 	Name:        "get_latest_data",
+				// 	Description: "Search the web for real-time, up-to-date information.",
+				// 	Parameters:  &getLatestDataParams,
+				// },
 				{
 					Name:        "memory_manager",
 					Description: "Add, edit, or delete persistent memories about user preferences, behaviors, or facts.",
@@ -295,6 +387,26 @@ func init() {
 					Description: "Publish a local file as an HTTP artifact to share with the user.",
 					Parameters:  &publishArtifactParams,
 				},
+				{
+					Name:        "schedule_message",
+					Description: "Queue, list, edit, or delete a later action. mode=send posts the message text. mode=ai wakes you in that chat at that time and the message is your instruction (for example summarize the chat). Times are ISO-8601; no timezone means IST. Our scheduler sends it, not Telegram.",
+					Parameters:  &scheduleMessageParams,
+				},
+				{
+					Name:        "ytdlp",
+					Description: "Download a YouTube, Instagram, TikTok, Twitter, or other media URL with yt-dlp, using this user's cookies. Uploads to their S3 bucket when they have one and returns the link. Otherwise returns a local file_path for send_file.",
+					Parameters:  &ytdlpParams,
+				},
+				{
+					Name:        "browser",
+					Description: "Stealth browser session for this turn. Private chats get that user's browser. Groups share one browser. Tabs from today are listed in the system prompt and reopen on the first call. Later calls in this turn keep the same tabs. Omit url to stay on the current tab. Actions: state, text, screenshot, scroll, click, search, newtab, switch, close, download. download uploads a URL to this user's S3 and does not use the live tab.",
+					Parameters:  &browserParams,
+				},
+				{
+					Name:        "copylink",
+					Description: "Upload a local file or a Telegram file (file_id = message id in this chat) to this user's S3 bucket and return the link.",
+					Parameters:  &copyLinkParams,
+				},
 			},
 		},
 	}
@@ -302,7 +414,7 @@ func init() {
 	os.MkdirAll(GeneratedImagesDir, 0755)
 }
 
-func executeFunctionCall(fc *genai.FunctionCall, chatID int64, replyToMsgID int32) map[string]any {
+func executeFunctionCall(fc *genai.FunctionCall, chatID int64, replyToMsgID int32, userID int64, private bool) map[string]any {
 	switch fc.Name {
 	case "create_image":
 		return executeCreateImage(fc.Args)
@@ -318,8 +430,8 @@ func executeFunctionCall(fc *genai.FunctionCall, chatID int64, replyToMsgID int3
 		return executeViewFile(fc.Args, chatID)
 	case "publish_artifact":
 		return executePublishArtifact(fc.Args)
-	case "get_latest_data":
-		return executeGetLatestData(fc.Args)
+	// case "get_latest_data":
+	// 	return executeGetLatestData(fc.Args)
 	case "memory_manager":
 		return executeMemoryManager(fc.Args)
 	case "file_actions":
@@ -328,6 +440,14 @@ func executeFunctionCall(fc *genai.FunctionCall, chatID int64, replyToMsgID int3
 		return executeReadChat(fc.Args)
 	case "send_to_chat":
 		return executeSendToChat(fc.Args)
+	case "schedule_message":
+		return executeScheduleMessage(fc.Args, userID)
+	case "ytdlp":
+		return executeYtDlp(fc.Args, chatID, userID, private)
+	case "browser":
+		return executeBrowser(fc.Args, chatID, userID, private)
+	case "copylink":
+		return executeCopyLink(fc.Args, chatID, userID)
 	default:
 		return map[string]any{
 			"success": false,
@@ -538,6 +658,28 @@ func executeReadTaskLog(args map[string]any) map[string]any {
 		"success": true,
 		"task_id": taskID,
 		"content": string(out),
+	}
+}
+
+func asInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int64(n), true
+	case int:
+		return int64(n), true
+	case int32:
+		return int64(n), true
+	case int64:
+		return n, true
+	case json.Number:
+		i, err := n.Int64()
+		return i, err == nil
+	case string:
+		var i int64
+		_, err := fmt.Sscan(strings.TrimSpace(n), &i)
+		return i, err == nil
+	default:
+		return 0, false
 	}
 }
 

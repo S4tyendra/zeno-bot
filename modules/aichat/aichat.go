@@ -17,6 +17,7 @@ import (
 	"google.golang.org/genai"
 
 	"zeno/config"
+	"zeno/connectors"
 	"zeno/db"
 )
 
@@ -54,18 +55,22 @@ You're not just a pretty texter — you can actually do shit. Code, search, send
 - **send_file**: Send a file to the user. Params: file_path (required), caption (optional).
 - **run_code**: Execute code in a sandboxed container. Params: language (python/bash), code. Jobs longer than ~20s go to the background: reply with one short line (never an empty reply), and when the job finishes you get its output as a <system_event> in a new turn — continue the task from there (next step, send_file, or fix + retry). Don't poll it.
 - **Never end your turn with an empty reply.** After tools, always either call the next tool or say something.
-- **get_latest_data**: Search the web for real-time info. Params: query (required). Use this for current events, news, prices, weather — anything that needs fresh data. Don't hallucinate.
+- Never narrate a tool. Do not reply with "Sending file", "Calling browser", or any status line. Call send_file, then say something real, or nothing if the file is the whole reply.
+- **browser**: One stealth session per turn. DMs use that user's browser. Groups share one. Today's tabs are in <browser_session>. First call reopens them. Later calls in this same turn stay on those tabs, so omit url to scroll, click, or read the current tab. Actions: state, text, screenshot, scroll, click, search, newtab, switch, close, download. download sends a URL to this user's S3. wait is seconds, max 10.
 - **memory_manager**: Add, edit, or delete memories about users. Params: action (add/edit/delete), userid (string), text (string), index (int).
 - **file_actions**: Read, create, edit, or upload files in container storage. Params: action (read/create/edit/upload), file_path, content, find, replace.
-- **read_chat**: Read recent messages from any chat. Params: chat_id (int), limit (int).
-- **send_to_chat**: Send a message to any chat. Params: chat_id (int), text (string).
+- **read_chat**: Read recent messages from any chat. Params: chat_id (int), limit (int). Chat names and ids are in <known_chats> below — if they say "devchat", match that name and use the id. Don't ask for the id.
+- **send_to_chat**: Send a message to any chat. Params: chat_id (int), text (string). Same name→id rule.
+- **schedule_message**: Queue a later action. Our scheduler runs it. Params: action (list/create/edit/delete). list: chatid optional. create: chatid, time (ISO-8601, no timezone = IST), message, mode (send posts the text, ai wakes you in that chat and message is the task, e.g. summarize the chat). edit: scheduledid plus any of new_time, new_chatid, new_message, new_mode. delete: scheduledid.
+- **ytdlp**: Download YouTube, Instagram, TikTok, Twitter, or a direct file. Uses this user's cookies. Uploads to their S3 when they have one. Params: url, name (optional).
+- **copylink**: Upload a local file or a Telegram file to this user's S3 and return the link. Params: file_path or file_id (message id), name (optional).
 - **create_image**: Generate images from text. Params: prompt (required), aspect_ratio (1:1/9:16/16:9/3:4/4:3/3:2/2:3/5:4/4:5/21:9), high_quality (bool). Default is 9:16. 4K costs more — only use high_quality when @s4tyendra asks. Saves to /app/generated/.
   Workflows: create_image -> returns path -> send_file. run_code creates in /workspace/ -> send_file from there.
 - **view_file**: Reload a Telegram file by file_id (the message id shown in context) or read a local path. GCS objects expire after 24h — if a file says expired, call view_file with that file_id. Native Gemini types (images/video/audio/pdf/txt/html/css/csv/md/xml) get attached so you can actually see them.
 
 ## Efficiency Rules
 - Action over words. Don't paste code — run it. Unless they specifically ask to see it.
-- If you don't know something, use get_latest_data. Start with "idk tbh" if unsure. Never fake info.
+- If you don't know something current, use browser search. Start with "idk tbh" if unsure. Never fake info.
 - Don't guess file names or directory contents. Use ls/cat/find via run_code.
 - Don't run the same command twice like a noob. Use -la flags upfront.
 - If a tool returns nothing useful, move on. Don't rephrase the same query 5 times.
@@ -177,10 +182,11 @@ func Register(client *telegram.Client) {
 	ensureTelegraphToken()
 	initPerplexity()
 	startJWTRefreshCron()
+	startScheduler()
 
 	client.On("cmd:askai", handleAskAI)
 	client.On("cmd:ask", handleAskAI)
-	client.On("cmd:search", handleSearch)
+	// client.On("cmd:search", handleSearch) // Perplexity web search is dead.
 	client.On("message", handleMessage)
 	client.On("callback:get_vertex_links", handleGetVertexLinks)
 }
@@ -241,6 +247,7 @@ func handleMessage(m *telegram.NewMessage) error {
 	if !FilterAllowed(m) {
 		return nil
 	}
+	rememberMessageChat(m)
 	text := m.Text()
 
 	if strings.HasPrefix(text, "/") {
@@ -326,7 +333,7 @@ func runAITurn(m *telegram.NewMessage, query, followUp string) error {
 	prog.step("Thinking")
 
 	start := time.Now()
-	responseText, sourcesURL, usage, err := processWithFunctionCalling(ctx, contents, chatID, m.ID, placeholder)
+	responseText, sourcesURL, usage, err := processWithFunctionCalling(ctx, contents, chatID, m.ID, placeholder, m.SenderID(), m.IsPrivate())
 	usage.Elapsed = time.Since(start)
 	go postAIUsageLog(m, query, usage, err)
 	if err != nil {
@@ -346,6 +353,88 @@ func runAITurn(m *telegram.NewMessage, query, followUp string) error {
 	}
 
 	return sendLargeResponse(m, placeholder, responseText)
+}
+
+// RunScheduledPrompt wakes the model in chatID as userID and runs prompt.
+func RunScheduledPrompt(chatID, userID int64, prompt string) error {
+	if botClient == nil {
+		return fmt.Errorf("bot is not ready")
+	}
+	placeholder, err := botClient.SendMessage(chatID, "...")
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+	defer cancel()
+
+	contents, err := buildScheduledTurns(ctx, chatID, placeholder.ID, userID, prompt)
+	if err != nil {
+		_, _ = placeholder.Edit("Couldn't load the chat for this scheduled task.")
+		return err
+	}
+	responseText, _, _, err := processWithFunctionCalling(ctx, contents, chatID, placeholder.ID, placeholder, userID, chatID == userID)
+	if err != nil {
+		_, _ = placeholder.Edit(fmt.Sprintf("❌ Scheduled task failed: `%s`", truncateString(err.Error(), 180)))
+		return err
+	}
+	if strings.TrimSpace(responseText) == "" {
+		_, _ = placeholder.Delete()
+		return nil
+	}
+	return sendLargeResponse(placeholder, placeholder, responseText)
+}
+
+func buildScheduledTurns(ctx context.Context, chatID int64, anchorID int32, userID int64, prompt string) ([]*genai.Content, error) {
+	history := fetchTelegramHistory(chatID, anchorID, 40)
+	var contents []*genai.Content
+	if userID != 0 {
+		memories, err := getMemoriesForUsers(ctx, []int64{userID})
+		if err == nil && len(memories[userID]) > 0 {
+			var b strings.Builder
+			b.WriteString("<memories>\n")
+			for _, mem := range memories[userID] {
+				fmt.Fprintf(&b, "<memory index=%d>%s</memory>\n", mem.Index, mem.Text)
+			}
+			b.WriteString("</memories>")
+			contents = append(contents, &genai.Content{
+				Role:  genai.RoleUser,
+				Parts: []*genai.Part{{Text: b.String()}},
+			})
+		}
+	}
+	for _, msg := range history {
+		senderID := msg.SenderID()
+		isBot := senderID == botUserID
+		text := msg.Text()
+		if isBot {
+			text = stripStatusNoise(text)
+			if text == "" || isJunkBotMessage(text) {
+				continue
+			}
+		}
+		chatName := "PrivateChat"
+		if _, title, _ := chatLabel(&msg); title != "" {
+			chatName = title
+		}
+		var formatted string
+		when := time.Unix(int64(msg.Date()), 0)
+		if isBot {
+			formatted = formatXMLMessage(text, "ZenoBot", botUserID, chatID, chatName, msg.ID, when)
+		} else {
+			formatted = formatXMLMessage(msg.Text(), getSenderFromMessage(&msg), senderID, chatID, chatName, msg.ID, when)
+		}
+		role := genai.RoleUser
+		if isBot {
+			role = genai.RoleModel
+		}
+		contents = append(contents, &genai.Content{Role: role, Parts: []*genai.Part{{Text: formatted}}})
+	}
+	note := fmt.Sprintf("<scheduled_task user=%d>\n%s\n</scheduled_task>\nDo this task now, using the chat above as context. Reply in this chat.", userID, prompt)
+	contents = append(contents, &genai.Content{
+		Role:  genai.RoleUser,
+		Parts: []*genai.Part{{Text: note}},
+	})
+	return contents, nil
 }
 
 func utf16Slice(s string, offset, length int32) string {
@@ -418,19 +507,22 @@ func buildDynamicTurns(ctx context.Context, m *telegram.NewMessage, query string
 	for _, msg := range history {
 		senderID := msg.SenderID()
 		isBot := senderID == botUserID
-		if isBot && isJunkBotMessage(msg.Text()) {
-			// Old failure placeholders teach the model that empty replies are normal.
-			continue
+		msgText := msg.Text()
+		if isBot {
+			msgText = stripStatusNoise(msgText)
+			if msgText == "" || isJunkBotMessage(msgText) {
+				// Old failure placeholders teach the model that empty replies are normal.
+				continue
+			}
 		}
 		isCurrent := msg.ID == m.ID
 		msgID := msg.ID
 
 		chatName := "PrivateChat"
-		if msg.Chat != nil && msg.Chat.Title != "" {
-			chatName = msg.Chat.Title
+		if _, title, _ := chatLabel(&msg); title != "" {
+			chatName = title
 		}
 
-		msgText := msg.Text()
 		if isCurrent && query != "" {
 			msgText = query
 		}
@@ -601,7 +693,7 @@ func saveToolCallHistory(ctx context.Context, chatID int64, msgID int32, name st
 	}
 }
 
-var xmlResponseStrip = regexp.MustCompile(`<[/]?(?:message|memories|user_memories|memory)\b[^>]*>`)
+var xmlResponseStrip = regexp.MustCompile(`<[/]?(?:message|memories|user_memories|memory|known_chats|peer|user_connector|scheduled_task|browser_session|btab)\b[^>]*>`)
 
 func stripXMLFromResponse(text string) string {
 	cleaned := strings.TrimSpace(xmlResponseStrip.ReplaceAllString(text, ""))
@@ -663,8 +755,43 @@ func isJunkBotMessage(text string) bool {
 		return true
 	case strings.HasPrefix(t, "❌ Google failed"), strings.HasPrefix(t, "⏳ Google"):
 		return true
+	case isStatusNoise(t):
+		return true
 	}
 	return false
+}
+
+// isStatusNoise is the placeholder text we edit in while a tool runs. The model
+// copies it back as a reply if it stays in the history.
+func isStatusNoise(text string) bool {
+	t := strings.TrimSpace(text)
+	t = strings.Trim(t, "`*_")
+	for _, p := range []string{
+		"📤 Sending file",
+		"Sending file",
+		"🎨 Generating image",
+		"💻 Running code",
+		"🔍 Searching",
+		"🔧 Calling",
+		"💭 thinking",
+		"💭 **",
+	} {
+		if strings.HasPrefix(t, p) || strings.EqualFold(t, strings.TrimRight(p, "…")) {
+			return true
+		}
+	}
+	return false
+}
+
+func stripStatusNoise(text string) string {
+	var keep []string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == "" || isStatusNoise(line) {
+			continue
+		}
+		keep = append(keep, line)
+	}
+	return strings.TrimSpace(strings.Join(keep, "\n"))
 }
 
 // deliveringTools put something in front of the user themselves, so an empty
@@ -685,15 +812,20 @@ func toolStatus(name string) string {
 	return fmt.Sprintf("🔧 Calling `%s`...", name)
 }
 
-func processWithFunctionCalling(ctx context.Context, contents []*genai.Content, chatID int64, currentMsgID int32, placeholder *telegram.NewMessage) (string, string, usageAcc, error) {
+func processWithFunctionCalling(ctx context.Context, contents []*genai.Content, chatID int64, currentMsgID int32, placeholder *telegram.NewMessage, userID int64, private bool) (string, string, usageAcc, error) {
 	model := db.GetRuntimeModel("default", config.DefaultModel)
 	prefs := LoadThinkingPrefs()
 	usage := usageAcc{Model: model, Thinking: prefs.Level, Stream: prefs.Stream}
 
+	beginBrowserTurn(private, chatID, userID)
+	defer endBrowserTurn(private, chatID, userID)
+
+	chatsBlock := knownChatsBlock()
+	promptText := SYSTEM_PROMPT + chatsBlock + connectors.PromptNote(userID) + browserStateNote(private, chatID, userID)
 	configAI := &genai.GenerateContentConfig{
 		SystemInstruction: &genai.Content{
 			Role:  genai.RoleModel,
-			Parts: []*genai.Part{{Text: SYSTEM_PROMPT}},
+			Parts: []*genai.Part{{Text: promptText}},
 		},
 		Temperature:     genai.Ptr(float32(0.35)),
 		TopP:            genai.Ptr(float32(0.95)),
@@ -710,11 +842,15 @@ func processWithFunctionCalling(ctx context.Context, contents []*genai.Content, 
 	}
 
 	lite := liteModelName()
+	liteCfg := liteConfigFrom(configAI, lite, prefs)
+	if liteCfg.SystemInstruction != nil && len(liteCfg.SystemInstruction.Parts) > 0 {
+		liteCfg.SystemInstruction.Parts[0].Text += connectors.PromptNote(userID) + browserStateNote(private, chatID, userID)
+	}
 	plan := &genPlan{
 		primary:    model,
 		primaryCfg: configAI,
 		lite:       lite,
-		liteCfg:    liteConfigFrom(configAI, lite, prefs),
+		liteCfg:    liteCfg,
 	}
 
 	status := func(s string) { editStatus(placeholder, s) }
@@ -759,7 +895,7 @@ func processWithFunctionCalling(ctx context.Context, contents []*genai.Content, 
 			}
 		}
 
-		if answer := acc.answerText(); answer != "" {
+		if answer := stripStatusNoise(acc.answerText()); answer != "" {
 			if finalText.Len() > 0 {
 				finalText.WriteString("\n")
 			}
@@ -780,7 +916,7 @@ func processWithFunctionCalling(ctx context.Context, contents []*genai.Content, 
 			status(toolStatus(fc.Name))
 			toolsUsed = append(toolsUsed, fc.Name)
 
-			result := executeFunctionCall(fc, chatID, currentMsgID)
+			result := executeFunctionCall(fc, chatID, currentMsgID, userID, private)
 			if attach, ok := result["_attach"].([]*genai.Part); ok {
 				extraParts = append(extraParts, attach...)
 			}

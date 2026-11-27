@@ -7,11 +7,13 @@ import (
 type TaskType string
 
 const (
-	TaskTypeTG     TaskType = "tg"
-	TaskTypeURL    TaskType = "url"
-	TaskTypeFast   TaskType = "fast"
-	TaskTypeYTDLP  TaskType = "ytdlp"
-	TaskTypeUpload TaskType = "upload"
+	TaskTypeTG      TaskType = "tg"
+	TaskTypeURL     TaskType = "url"
+	TaskTypeFast    TaskType = "fast"
+	TaskTypeYTDLP   TaskType = "ytdlp"
+	TaskTypeUpload  TaskType = "upload"
+	TaskTypeS3      TaskType = "s3"
+	TaskTypeS3Media TaskType = "s3media"
 )
 
 type TaskStatus string

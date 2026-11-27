@@ -13,6 +13,7 @@ services:
       - CONTAINERD_NAMESPACE=default
     volumes:
       - ./session.dat:/app/session.dat
+      - profiles:/app/data/profiles
       - generated_images:/app/generated
       - workspace:/workspace # Same path as code-runner
       - /var/run/docker.sock:/var/run/docker.sock
@@ -46,3 +47,4 @@ services:
 volumes:
   generated_images:
   workspace:
+  profiles:

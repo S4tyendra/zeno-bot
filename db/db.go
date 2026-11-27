@@ -102,6 +102,45 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_download_tasks_status_id ON download_tasks (status, id ASC)`,
 	`CREATE INDEX IF NOT EXISTS idx_download_tasks_chat_reply ON download_tasks (chat_id, reply_msg_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_download_tasks_chat_status ON download_tasks (chat_id, status_msg_id)`,
+	`CREATE TABLE IF NOT EXISTS scheduled_messages (
+		id TEXT PRIMARY KEY,
+		chat_id BIGINT NOT NULL,
+		user_id BIGINT NOT NULL DEFAULT 0,
+		mode TEXT NOT NULL DEFAULT 'send',
+		message TEXT NOT NULL,
+		send_at TIMESTAMPTZ NOT NULL,
+		status TEXT NOT NULL DEFAULT 'pending',
+		error TEXT NOT NULL DEFAULT '',
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		sent_at TIMESTAMPTZ
+	)`,
+	`CREATE TABLE IF NOT EXISTS user_s3 (
+		user_id BIGINT PRIMARY KEY,
+		endpoint TEXT NOT NULL,
+		bucket TEXT NOT NULL,
+		region TEXT NOT NULL DEFAULT 'us-east-1',
+		access_key TEXT NOT NULL,
+		secret_key TEXT NOT NULL,
+		prefix TEXT NOT NULL DEFAULT '',
+		public_base TEXT NOT NULL DEFAULT '',
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_scheduled_messages_due ON scheduled_messages (status, send_at)`,
+	`CREATE TABLE IF NOT EXISTS known_chats (
+		chat_id BIGINT PRIMARY KEY,
+		title TEXT NOT NULL,
+		kind TEXT NOT NULL DEFAULT 'group',
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE TABLE IF NOT EXISTS grok_requests (
+		id TEXT PRIMARY KEY,
+		chat_id BIGINT NOT NULL,
+		msg_id INTEGER NOT NULL,
+		user_id BIGINT NOT NULL DEFAULT 0,
+		replied BOOLEAN NOT NULL DEFAULT FALSE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
 }
 
 func Connect() {
@@ -150,6 +189,15 @@ func migrate(ctx context.Context) error {
 	// Files live in GCS (gs://aidatax); drop leftover BYTEA blobs.
 	if _, err := Pool.Exec(ctx, `ALTER TABLE uploaded_files DROP COLUMN IF EXISTS data`); err != nil {
 		return err
+	}
+	alters := []string{
+		`ALTER TABLE scheduled_messages ADD COLUMN IF NOT EXISTS user_id BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE scheduled_messages ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'send'`,
+	}
+	for _, stmt := range alters {
+		if _, err := Pool.Exec(ctx, stmt); err != nil {
+			return err
+		}
 	}
 	return nil
 }

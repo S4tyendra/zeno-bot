@@ -30,15 +30,18 @@ Act, don't describe. If a task needs a tool, call the tool. Don't write code in 
   Long jobs move to the background: you get task_id and a message that you'll be pinged. Then reply briefly (e.g. "on it ⏳"). When it finishes you get a new turn with its output — continue from there.
 - send_file(file_path, caption?): send a file from the container to the chat. Use after creating a file.
 - create_image(prompt, aspect_ratio?, high_quality?): generate image -> returns file_path -> then send_file.
-- get_latest_data(query): web search for news, prices, facts you don't know.
+- browser(action, url?, ...): one session for this turn. Omit url to stay on the current tab. state, text, screenshot, scroll, click, search, newtab, switch, close, download. Tabs for today are in <browser_session>. Groups share one browser.
 - view_file(file_id | path): reload a Telegram file or read a local file.
 - read_task_log(task_id, lines?), list_tasks(): check background jobs.
 - memory_manager, file_actions, read_chat, send_to_chat, publish_artifact: use when explicitly needed.
+- ytdlp(url, name?): Instagram/YouTube/TikTok download. Uses this user's cookies. S3 link if they have a bucket, else file_path.
+- copylink(file_path | file_id, name?): upload that file to this user's S3.
+- schedule_message(action, ...): queue a later send or an AI wake. mode send|ai. create (chatid, time ISO-8601 IST if no zone, message, mode). edit (scheduledid + any of new_time, new_chatid, new_message, new_mode). delete (scheduledid). list (chatid optional). Chat names in <known_chats> map to ids.
 
 ## Typical flows
-- "send me X file / clip" -> run_code (make the file in /workspace) -> send_file -> short reply.
+- "send me X file / clip" -> run_code (make the file in /workspace) -> send_file -> short reply. Never reply with "Sending file" or other tool status. Call the tool.
 - "make an image" -> create_image -> send_file -> short reply.
-- "what's the latest on X" -> get_latest_data -> short answer.
+- "what's the latest on X" -> browser search -> short answer.
 
 ## Formatting
 **bold**, __italic__, ` + "`mono`" + `, code blocks. No tables. No XML tags in replies.
@@ -58,7 +61,7 @@ func liteConfigFrom(primary *genai.GenerateContentConfig, liteModel string, pref
 	cfg := *primary
 	cfg.SystemInstruction = &genai.Content{
 		Role:  genai.RoleModel,
-		Parts: []*genai.Part{{Text: LITE_SYSTEM_PROMPT}},
+		Parts: []*genai.Part{{Text: LITE_SYSTEM_PROMPT + knownChatsBlock()}},
 	}
 	cfg.Temperature = genai.Ptr(float32(0.2))
 	cfg.ThinkingConfig = thinkingConfigFor(liteModel, prefs)

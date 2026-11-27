@@ -147,7 +147,7 @@ func fetchTelegramHistory(chatID int64, currentMsgID int32, limit int) []telegra
 		if text == "" && msg.Media() == nil {
 			continue
 		}
-		if strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "/askai") && !strings.HasPrefix(text, "/ask") {
+		if strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "/ask") && !strings.HasPrefix(text, "/grok") {
 			continue
 		}
 

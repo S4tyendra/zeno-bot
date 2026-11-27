@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/amarnathcjd/gogram/telegram"
+
+	"zeno/connectors"
 )
 
 const (
@@ -226,7 +228,7 @@ func DownloadAria2(ctx context.Context, taskID int64, rawURL, customName string,
 }
 
 // DownloadYtDlp downloads video/audio or m3u8 streams with realistic browser headers and HLS concurrency.
-func DownloadYtDlp(ctx context.Context, taskID int64, rawURL, customName string, isM3U8 bool, reporter *ThrottledReporter) (string, int64, error) {
+func DownloadYtDlp(ctx context.Context, taskID, userID int64, rawURL, customName string, isM3U8 bool, reporter *ThrottledReporter) (string, int64, error) {
 	taskDir, err := EnsureTaskDir(taskID)
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to create task directory: %w", err)
@@ -259,6 +261,10 @@ func DownloadYtDlp(ctx context.Context, taskID int64, rawURL, customName string,
 		headers["Sec-Fetch-Mode"] = "cors"
 		headers["Sec-Fetch-Site"] = "cross-site"
 		args = append(args, "--concurrent-fragments", "16", "--downloader", "m3u8:native")
+	}
+
+	if cookies := connectors.NetscapeCookies(userID); cookies != "" {
+		args = append(args, "--cookies", cookies)
 	}
 
 	if ref, ok := headers["Referer"]; ok {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/amarnathcjd/gogram/telegram"
+	"zeno/connectors"
 	"zeno/db"
 	"zeno/modules/aichat"
 )
@@ -47,6 +48,7 @@ func Register(client *telegram.Client) {
 	client.On("cmd:queue", handleTasks)
 
 	client.On("cmd:cancel", handleCancel)
+	client.On("cmd:link", handleLink)
 
 	client.On("callback:up", handleUploadCallback)
 	log.Println("[Downloader] Module registered successfully")
@@ -66,26 +68,14 @@ func handleDownload(m *telegram.NewMessage) error {
 	fields := strings.Fields(rawArgs)
 	replyToID := m.ReplyToMsgID()
 
-	// 1. Reply to a Telegram message
-	if replyToID != 0 {
-		// If user explicitly passed a URL while replying, download that URL
-		if len(fields) > 0 && isURL(fields[0]) {
-			rawURL := fields[0]
-			customName := strings.TrimSpace(strings.TrimPrefix(rawArgs, rawURL))
-			if isM3U8URL(rawURL) || isMediaSiteURL(rawURL) {
-				return enqueueDownload(m, TaskTypeYTDLP, rawURL, customName, replyToID)
-			}
-			return enqueueDownload(m, TaskTypeURL, rawURL, customName, replyToID)
-		}
-
-		// Otherwise, download the replied Telegram media directly
-		customName := rawArgs
-		return enqueueDownload(m, TaskTypeTG, "", customName, replyToID)
+	// A replied Telegram file is /link, not /download.
+	if replyToID != 0 && (len(fields) == 0 || !isURL(fields[0])) {
+		m.Reply("Telegram files use `/link` (reply to the file). `/download` only fetches a URL into your S3 bucket.", &telegram.SendOptions{ParseMode: "Markdown"})
+		return nil
 	}
 
-	// 2. Direct command without reply (requires URL)
 	if len(fields) == 0 {
-		m.Reply("ℹ️ **Usage:**\n• Reply to a Telegram media with `/download [custom_name]`\n• `/download <url> [custom_name]`\n• `/fastdownload <url> [custom_name]` (16 parallel connections)\n• `/ytdlp <url> [custom_name]` (video/audio/m3u8)", &telegram.SendOptions{ParseMode: "Markdown"})
+		m.Reply("ℹ️ **Usage:** `/download <url> [custom_name]`\nStreams the file into your S3 bucket. Set the bucket with `/s3`. Reply to a Telegram file with `/link`.", &telegram.SendOptions{ParseMode: "Markdown"})
 		return nil
 	}
 
@@ -96,12 +86,30 @@ func handleDownload(m *telegram.NewMessage) error {
 	}
 	customName := strings.TrimSpace(strings.TrimPrefix(rawArgs, rawURL))
 
-	// Auto-route m3u8 or media platforms to yt-dlp
-	if isM3U8URL(rawURL) || isMediaSiteURL(rawURL) {
-		return enqueueDownload(m, TaskTypeYTDLP, rawURL, customName, 0)
+	if _, err := connectors.Load(context.Background(), m.SenderID()); err != nil {
+		m.Reply("Set your bucket first:\n`/s3 endpoint=...`\n`bucket=...`\n`access_key=...`\n`secret_key=...`", &telegram.SendOptions{ParseMode: "Markdown"})
+		return nil
 	}
 
-	return enqueueDownload(m, TaskTypeURL, rawURL, customName, 0)
+	if isM3U8URL(rawURL) || isMediaSiteURL(rawURL) {
+		return enqueueDownload(m, TaskTypeS3Media, rawURL, customName, 0)
+	}
+	return enqueueDownload(m, TaskTypeS3, rawURL, customName, 0)
+}
+
+func handleLink(m *telegram.NewMessage) error {
+	if !aichat.FilterAllowed(m) {
+		return nil
+	}
+	if m.ReplyToMsgID() == 0 {
+		m.Reply("Reply to a Telegram file with `/link`.", &telegram.SendOptions{ParseMode: "Markdown"})
+		return nil
+	}
+	if _, err := connectors.Load(context.Background(), m.SenderID()); err != nil {
+		m.Reply("Set your bucket first with `/s3`.", &telegram.SendOptions{ParseMode: "Markdown"})
+		return nil
+	}
+	return enqueueDownload(m, TaskTypeTG, "", strings.TrimSpace(m.Args()), m.ReplyToMsgID())
 }
 
 func handleFastDownload(m *telegram.NewMessage) error {

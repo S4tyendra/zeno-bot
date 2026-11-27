@@ -11,14 +11,22 @@ func handleHelp(m *telegram.NewMessage) error {
 • /ask <query or reply> — Gemini (alias: /askai)
 • /search <query or reply> — web search (Perplexity)
 • @ask <query> — same as /ask
+• /grok <prompt> — ask Grok. Reply to a file to share it via a 1h link from your S3
 • Reply to the bot — continues the AI chat
 • Reply to text/media with /ask or @ask — that message is sent as context
 
+**Storage**
+• /s3 — show your bucket, or set it with endpoint=, bucket=, access_key=, secret_key=, region=, prefix=, public_base=
+• /s3 clear — remove it
+• /cookies — cookie count. Reply to a Netscape cookies.txt or JSON export to save them
+• /cookies clear — wipe the browser profile
+• /link — reply to a Telegram file. Uploads it to your bucket and replies with the link
+
 **Downloader** (one task at a time, others queue)
-• /download <url> [name] — web file, or reply to Telegram media (aliases: /dl)
-  m3u8 / YouTube / Instagram / similar → yt-dlp automatically
-• /fastdownload <url> [name] — aria2c 16 connections (aliases: /fastdl, /fdl)
-• /ytdlp <url> [name] — YouTube, Instagram, TikTok, or raw .m3u8 (aliases: /ytdl)
+• /download <url> [name] — stream a URL into your S3 bucket (aliases: /dl)
+  m3u8 / YouTube / Instagram / similar → yt-dlp, then the bucket
+• /fastdownload <url> [name] — aria2c 16 connections, saved here for Telegram upload (aliases: /fastdl, /fdl)
+• /ytdlp <url> [name] — YouTube, Instagram, TikTok, or raw .m3u8, saved here (aliases: /ytdl). Uses your /cookies
 • /rename <id> <new_name> — or reply to a completed task
 • /upload <id> [auto|video|doc|file|audio|photo] — or reply (alias: /up)
   After a download, buttons pick the upload type
