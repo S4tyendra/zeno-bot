@@ -100,6 +100,7 @@ func handlePin(m *telegram.NewMessage) error {
 	}
 
 	log.Printf("[Admin] /pin msg %d in chat %d (silent=%v) by %d", m.ReplyToMsgID(), m.ChatID(), silent, m.SenderID())
+	deleteTriggeringCommand(m)
 	return nil
 }
 
@@ -121,5 +122,17 @@ func handleUnpin(m *telegram.NewMessage) error {
 
 	log.Printf("[Admin] /unpin msg %d in chat %d by %d", m.ReplyToMsgID(), m.ChatID(), m.SenderID())
 	m.Reply("✅ Message unpinned.")
+	deleteTriggeringCommand(m)
 	return nil
+}
+
+// deleteTriggeringCommand deletes the triggering /pin or /unpin command message
+// in groups when the bot has delete-messages permission, failing gracefully if not.
+func deleteTriggeringCommand(m *telegram.NewMessage) {
+	if m == nil || m.IsPrivate() {
+		return
+	}
+	if _, err := m.Delete(); err != nil {
+		log.Printf("[Admin] could not delete command msg %d in chat %d: %v", m.ID, m.ChatID(), err)
+	}
 }
